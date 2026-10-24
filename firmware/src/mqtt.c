@@ -10,15 +10,19 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "graph_fetch.h"
-#include "mqtt_cert.h"
 #include "mqtt_client.h"
 #include "path_resolver.h"
 #include "portmacro.h"
+#include "sdkconfig.h"
 #include "sensors.h"
 #include <inttypes.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+
+#if CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
+#    include "esp_crt_bundle.h"
+#endif
 
 static const char* TAG = "mqtt";
 
@@ -138,8 +142,13 @@ esp_err_t mqtt_app_start(void) {
         .broker =
             {
                 .address.uri = MQTT_BROKER_URI,
-                .verification.certificate = (const char*)mqtt_cert_pem,
-                .verification.certificate_len = sizeof(mqtt_cert_pem),
+
+                .verification =
+                    {
+#if CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
+                        .crt_bundle_attach = esp_crt_bundle_attach,
+#endif
+                    },
             },
         .credentials =
             {

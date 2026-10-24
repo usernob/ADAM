@@ -4,8 +4,8 @@
 #include "esp_err.h"
 
 // WiFi parameters
-#define WIFI_SSID "BANI_ISHAQ_FAMILY"
-#define WIFI_PASS "bapaksugeng"
+#define WIFI_SSID "Wokwi-GUEST"
+#define WIFI_PASS ""
 
 esp_err_t init_wifi_sta();
 
