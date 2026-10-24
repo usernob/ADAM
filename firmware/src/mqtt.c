@@ -48,6 +48,9 @@ static void telemetry_task(void* pvParameters) {
     }
 }
 
+static inline bool cmp_topic(const esp_mqtt_event_handle_t event, const char* topic) {
+    return event->topic_len == strlen(topic) && memcmp(event->topic, topic, event->topic_len) == 0;
+}
 static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_t event_id, void* event_data) {
     ESP_LOGD(TAG, "Event dispatched from event loop base=%s, event_id=%" PRIi32, base, event_id);
     esp_mqtt_event_handle_t event = event_data;
@@ -87,8 +90,7 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_
         ESP_LOGI(TAG, "TOPIC=%.*s", event->topic_len, event->topic);
         ESP_LOGI(TAG, "DATA=%.*s", event->data_len, event->data);
 
-        if (event->topic_len == strlen(MQTT_MOVE_TOPIC) &&
-            memcmp(event->topic, MQTT_MOVE_TOPIC, event->topic_len) == 0) {
+        if (cmp_topic(event, MQTT_MOVE_TOPIC)) {
             if (event->data_len >= 1) {
                 mqtt_job_t job = {
                     .node = event->data[0],
@@ -96,8 +98,7 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_
                 };
                 xQueueSend(s_job_queue, &job, (TickType_t)0);
             }
-        } else if (event->topic_len == strlen(MQTT_RESET_TOPIC) &&
-                   memcmp(event->topic, MQTT_RESET_TOPIC, event->topic_len) == 0) {
+        } else if (cmp_topic(event, MQTT_RESET_TOPIC)) {
             // Spec 6.2: admin reset, payload node ('A' default). Flush the
             // remaining commands so the recovery route stays clean.
             mqtt_flush_jobs();
@@ -106,8 +107,7 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_
                 .reset = true,
             };
             xQueueSend(s_job_queue, &job, (TickType_t)0);
-        } else if (event->topic_len == strlen(MQTT_REFRESHGRAPH_TOPIC) &&
-                   memcmp(event->topic, MQTT_REFRESHGRAPH_TOPIC, event->topic_len) == 0) {
+        } else if (cmp_topic(event, MQTT_REFRESHGRAPH_TOPIC)) {
             graph_fetch_notify();
         }
 

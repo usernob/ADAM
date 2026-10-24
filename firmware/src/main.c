@@ -6,6 +6,7 @@
 #include "esp_netif.h"
 #include "esp_system.h"
 #include "executor.h"
+#include "freertos/projdefs.h"
 #include "graph_fetch.h"
 #include "motor.h"
 #include "mqtt.h"
