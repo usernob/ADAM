@@ -9,19 +9,19 @@
 #define MQTT_USERNAME "adam"
 #define MQTT_PASSWORD "somethingsecret"
 
-// Server -> robot topics (docs/06-protokol.md)
+// Server -> robot topics (docs/06-protocol.md)
 #define MQTT_MOVE_TOPIC "srv/adam/moveto"
 #define MQTT_RESET_TOPIC "srv/adam/reset"
 #define MQTT_REFRESHGRAPH_TOPIC "srv/adam/refreshgraph"
 
-// Robot -> server topics (docs/06-protokol.md, QoS 1, retain)
+// Robot -> server topics (docs/06-protocol.md, QoS 1, retain)
 #define MQTT_CURRENT_POS_TOPIC "adam/srv/current_pos" // 1 byte ASCII 'A'..
 #define MQTT_STATUS_TOPIC "adam/srv/status"           // 1 byte adam_status_t
 #define MQTT_BATTERY_TOPIC "adam/srv/battery"         // 1 byte 0..100
 #define MQTT_TRASH_TOPIC "adam/srv/trash"             // 1 byte 0..100 (100 = full)
 #define MQTT_ERROR_TOPIC "adam/srv/error"             // 1 byte adam_error_t, no retain
 
-/* Wire enums (docs/06-protokol.md). Payloads are raw 1-byte enums, never
+/* Wire enums (docs/06-protocol.md). Payloads are raw 1-byte enums, never
  * strings: machines talk to machines on MQTT, so a state change is a single
  * byte assignment instead of string copies/compares. Rules:
  * - append-only: never renumber an already released code

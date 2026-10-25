@@ -39,7 +39,7 @@ static void telemetry_task(void* pvParameters) {
         char pos = (char)(path_resolver_current() + 'A');
         uint8_t status = (uint8_t)executor_status();
 
-        // docs/06-protokol.md: raw 1-byte payloads, battery/status/pos/trash
+        // docs/06-protocol.md: raw 1-byte payloads, battery/status/pos/trash
         // retained true, QoS 1
         mqtt_publish(MQTT_BATTERY_TOPIC, (const char*)&battery, 1, 1, true);
         mqtt_publish(MQTT_TRASH_TOPIC, (const char*)&trash, 1, 1, true);

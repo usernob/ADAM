@@ -18,7 +18,7 @@
 
 static const char* TAG = "executor";
 
-/* Robot status wire codes (adam_status_t, docs/06-protokol.md):
+/* Robot status wire codes (adam_status_t, docs/06-protocol.md):
  * IDLE/MOVING/DWELL/ERROR are published. OBSTACLE is reserved and no longer
  * emitted now that the BFD-1000 Near brake has been removed.
  * s_state below is the *scheduler* state (what the task loop does),
@@ -65,7 +65,7 @@ static int64_t s_no_line_since = -1;
 // sensor view before the next node may be detected
 static bool s_wait_clear = false;
 
-// Serial log name only - never sent on the wire (docs/06-protokol.md)
+// Serial log name only - never sent on the wire (docs/06-protocol.md)
 static const char* err_name(adam_error_t err) {
     switch (err) {
     case ADAM_ERR_NO_PATH:

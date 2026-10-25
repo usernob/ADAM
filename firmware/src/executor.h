@@ -6,7 +6,7 @@
 
 esp_err_t init_executor(void);
 
-// Current robot status (published wire code, docs/06-protokol.md)
+// Current robot status (published wire code, docs/06-protocol.md)
 adam_status_t executor_status(void);
 
 /* Enter the ERROR state (LINE_LOST / NODE_TIMEOUT / NO_PATH):
