@@ -323,6 +323,7 @@ Tidak ada jalur update graf di tengah job. Jika robot reboot tak terduga ketika 
 * **Clean session = true.** Subscription dipasang ulang setiap reconnect; tidak ada antrean perintah lama di broker. Karena itu `reset` yang dikirim saat robot offline tidak akan tersimpan; gateway hanya mengirim saat robot online, dan admin dapat mengulang setelah robot kembali.
 * Keepalive 30 detik.
 * Robot terhubung lewat **WSS port 443** (`wss://adam.example.com/mqtt`) melalui Cloudflare Tunnel → Caddy → Mosquitto WebSocket listener di localhost.
+* **Browser tidak pernah membuka koneksi MQTT.** Jalur WSS hanya untuk robot; kredensial MQTT tidak boleh dikirim ke frontend. Browser hanya memakai HTTP/SSE ke gateway.
 * Gateway terhubung ke Mosquitto lokal (`mqtt://127.0.0.1:1883`).
 * Opsi fallback MQTT langsung: `mqtts://vps.example.com:8883` dengan port mapping dan sertifikat DNS-01 (lihat [docs/10-deployment.md](10-deployment.md)).
 * Tidak ada anonymous access. ACL memisahkan hak gateway dan robot.

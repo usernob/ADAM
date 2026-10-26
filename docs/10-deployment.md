@@ -28,7 +28,7 @@ Internet
    | http://127.0.0.1:8080
    v
 [ Caddy ]
-   ├── /mqtt*  -> 127.0.0.1:8083  (Mosquitto WebSocket)
+   ├── /mqtt*  -> 127.0.0.1:8083  (Mosquitto WebSocket, robot only)
    └── /*      -> 127.0.0.1:3000  (Node Gateway)
                         |
                         ├── SQLite: data/adam.db
@@ -44,6 +44,8 @@ Internet
 ```
 
 VPS berada di belakang NAT. Tidak ada port 80, 443, 1883, 8083, atau 8883 yang perlu dibuka ke internet. Cloudflare Tunnel membuka koneksi **keluar** ke Cloudflare, lalu Cloudflare meneruskan trafik masuk.
+
+Jalur WSS `/mqtt` hanya dipakai robot. Browser tidak pernah membuka koneksi MQTT dan tidak boleh menerima kredensial MQTT; browser hanya memakai HTTP/SSE ke Node Gateway. Jalur `/mqtt` tetap publik agar robot bisa connect dari jaringan luar, jadi lindungi dengan TLS, password kuat, ACL, dan rate limit di edge.
 
 ## 10.2 Komponen & Port
 
