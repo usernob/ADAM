@@ -1,4 +1,4 @@
-# 9. Pemetaan Pin (Pin Mapping)
+# 8. Pemetaan Pin (Pin Mapping)
 
 *Bagian dari spesifikasi Project A.D.A.M — indeks: [README.md](../README.md)*
 
@@ -19,21 +19,21 @@ Sumber kebenaran tabel ini adalah `#define` di `src/motor.h`, `src/sensors.h`, d
 
 PWM: frekuensi 1 kHz, resolusi 8-bit (duty 0–255), timer LEDC low-speed.
 
-## Sensor Garis BFD-1000 (5 channel)
+## Sensor Garis BFD-1000 (3 channel aktif)
+
+Modul BFD-1000 punya 5 channel output, tetapi firmware hanya memakai **3 channel** (kiri, tengah, kanan) sesuai `SENSORS_PIN_LF_*` di `sensors.h`. Pola garis 3 bit: bit0 = kiri, bit1 = tengah, bit2 = kanan; persimpangan = `0b111`.
 
 | GPIO | Sinyal | Arah | Keterangan |
 | :--- | :--- | :--- | :--- |
-| 34 | S1 (paling kiri) | Input | Bit0 pola garis |
-| 35 | S2 | Input | Bit1 pola garis |
-| 39 | S3 (tengah) | Input | Bit2 pola garis |
-| 21 | S4 | Input | Bit3 pola garis |
-| 22 | S5 (paling kanan) | Input | Bit4 pola garis |
+| 39 | Kiri | Input | Bit0 pola garis |
+| 34 | Tengah | Input | Bit1 pola garis |
+| 35 | Kanan | Input | Bit2 pola garis |
 
 > ⚠️ **Polaritas:** output digital BFD-1000 aktif-*low* — `LOW` saat sensor melihat garis hitam, `HIGH` di latar putih. Firmware membalik level ini di `sensors.c`; jika modul yang dipakai aktif-*high*, ubah `SENSORS_LINE_ACTIVE_LOW` menjadi `0` di `sensors.h`.
 >
 > ⚠️ **Catu daya:** hubungkan `VCC` BFD-1000 ke **3.3 V**, bukan 5 V, karena output digital-nya mengikuti tegangan VCC dan GPIO ESP32 tidak toleran 5 V.
 >
-> ⚠️ GPIO 34, 35, 39 adalah *input-only* pin dan **tidak punya pull internal** — konfigurasi `GPIO_PULLUP_ENABLE` di `sensors.c` tidak berpengaruh pada ketiganya. GPIO 21/22 adalah input normal dengan pull-up internal, tetapi output BFD-1000 bersifat *push-pull* sehingga pull-up tidak diperlukan.
+> ⚠️ GPIO 34, 35, 39 adalah *input-only* pin dan **tidak punya pull internal** — konfigurasi `GPIO_PULLUP_ENABLE` di `sensors.c` tidak berpengaruh pada ketiganya. Output BFD-1000 bersifat *push-pull* sehingga pull-up memang tidak diperlukan. Channel modul yang tidak dipakai (GPIO 21/22 pada tabel versi 5 channel) dibiarkan tidak tersambung.
 
 ## Sensor IR Tangan (FC-51) di Bukaan Tempat Sampah
 
@@ -60,7 +60,7 @@ PWM: frekuensi 1 kHz, resolusi 8-bit (duty 0–255), timer LEDC low-speed.
 | 4 | TRIG | Out | Trigger pulse |
 | 15 | ECHO | Input | Echo (pull-up enable, gunakan divider 1k/2k karena output 5 V) |
 
-> HC-SR04 dipasang di bagian atas wadah yang tetap dan mengukur jarak ke permukaan sampah. Kalibrasi `SENSORS_TRASH_EMPTY_CM` (kosong) dan `SENSORS_TRASH_FULL_CM` (penuh) di `sensors.h`; persentase dikirim ke `adam/srv/trash`.
+> HC-SR04 dipasang di bagian atas wadah yang tetap dan mengukur jarak ke permukaan sampah. Kalibrasi `SENSORS_TRASH_EMPTY_CM` (dasar wadah, skala 0%) dan `SENSORS_TRASH_FULL_CM` (titik skala 100%) di `sensors.h`, plus ambang penolakan `SENSORS_TRASH_FULL_PERCENT` (95%); persentase dikirim ke `adam/srv/trash`.
 
 ## Aktuator & Ekstra
 

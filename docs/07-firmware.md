@@ -39,11 +39,12 @@ Firmware dijalankan menggunakan Sistem Operasi Real-Time (**FreeRTOS**) pada mik
    * Setelah graf siap, robot mem-publish `current_pos = [A][0]`, `graph_version` sebenarnya, `status = IDLE`, baterai, dan kapasitas sampah.
 
 2. **Menerima `moveto`**
-   * `Task MQTT` hanya menerima jika status `IDLE`, mailbox kosong, dan graf sudah siap.
+   * `Task MQTT` hanya menerima jika status `IDLE`, mailbox kosong, graf sudah siap, dan kapasitas sampah di bawah ambang penuh.
    * Cek pasangan `(req_id, node)` di cache deduplikasi. Jika sudah pernah diproses → `ack DUPLICATE` dan jangan masukkan job lagi. Cek ini dilakukan sebelum cek `BUSY` agar retry QoS 1 tidak dianggap job baru.
    * Jika status `ERROR`, graf belum siap, atau `graph_version = 0` → `ack NOT_READY`.
    * Jika byte target bukan `A`–`Z` → `ack INVALID_TARGET`. Robot tidak memvalidasi ulang apakah node itu aktif di graf; gateway adalah source of truth dan hanya mengirim node aktif.
    * Jika tidak `IDLE` atau mailbox terisi → `ack BUSY`.
+   * Jika kapasitas sampah ≥ `SENSORS_TRASH_FULL_PERCENT` (default 95%, baca `sensors_trash_level_percent()` saat request masuk) → `ack TRASH_FULL`. Robot menolak seluruh `moveto` baru sampai kapasitas di bawah ambang; tidak ada job yang diantre selama penuh. `srv/adam/reset` tetap diterima.
    * Masukkan `{req_id, node}` ke mailbox 1 slot. Periksa hasil `xQueueSend`; jika gagal → `ack BUSY`.
    * Kirim `ack ACCEPTED` setelah job benar-benar masuk mailbox. Ack berarti “diterima”, bukan “rute sudah ditemukan”.
 
@@ -100,14 +101,14 @@ Firmware dijalankan menggunakan Sistem Operasi Real-Time (**FreeRTOS**) pada mik
   * `current` = node terakhir yang dikonfirmasi.
   * `next` = node yang sedang dituju, atau `0x00` jika tidak ada.
   * Dikirim saat mulai edge, saat tiba di node, saat `DWELL`, saat `IDLE`, dan saat `ERROR`.
-* **`adam/srv/status`** → 1 byte (`IDLE`, `MOVING`, `DWELL`, `ERROR`), retain. Dikirim setiap **3 detik** agar gateway dapat memakai timeout status 10 detik.
+* **`adam/srv/status`** → 1 byte (`IDLE`, `MOVING`, `DWELL`, `ERROR`), retain. Dikirim **saat berubah** (event-driven); kesegaran dispatch ditentukan heartbeat `online`, bukan kedatangan pesan status.
 * **`adam/srv/graph_version`** → 4 byte little-endian, retain. `0` = graf belum siap; nilai lain = versi graf yang aktif.
-* **`adam/srv/battery`** → 1 byte persentase, retain.
-* **`adam/srv/trash`** → 1 byte persentase kapasitas sampah, retain.
-* **`adam/srv/online`** → 1 byte, retain, LWT `0`. Sebelum disconnect normal, robot mem-publish `0` sendiri karena broker tidak mem-publish LWT pada clean disconnect.
+* **`adam/srv/battery`** → 1 byte persentase, retain. Dikirim periodik tiap **30 detik**.
+* **`adam/srv/trash`** → 1 byte persentase kapasitas sampah, retain. Dikirim saat boot dan **setelah penutup ditutup** (akhir dwell).
+* **`adam/srv/online`** → 1 byte, retain, LWT `0`. `0x01` dipublish saat connect lalu diulang tiap **10 detik** sebagai heartbeat. Sebelum disconnect normal, robot mem-publish `0` sendiri karena broker tidak mem-publish LWT pada clean disconnect.
 * **`adam/srv/ack`** dan **`adam/srv/error`** tidak di-retain dan selalu membawa `req_id` 2 byte.
 
-`status` dikirim setiap 3 detik. `current_pos`, `battery`, dan `trash` dikirim saat berubah, ditambah snapshot periodik 30–60 detik. `graph_version` dikirim saat boot/perubahan. Setelah reconnect, robot mem-publish ulang state retained terbaru. Retained `status` hanya untuk last-known di web; gateway tetap mewajibkan status fresh sebelum dispatch.
+Kadensi telemetri **event-driven**: `status` saat berubah; `current_pos` saat mulai edge, tiba di node, `DWELL`, `IDLE`, dan `ERROR`; `trash` saat boot dan setelah penutup ditutup; `graph_version` saat boot/perubahan. `battery` periodik tiap 30 detik dan `online` heartbeat tiap 10 detik adalah satu-satunya pesan periodik. Setelah reconnect, robot mem-publish ulang state retained terbaru dan heartbeat berjalan lagi. Retained `status` hanya untuk last-known di web; gateway tetap mewajibkan heartbeat fresh (≤ 30 detik) sebelum dispatch.
 
 ## 7.5 Invarian Firmware
 
@@ -120,13 +121,13 @@ Firmware dijalankan menggunakan Sistem Operasi Real-Time (**FreeRTOS**) pada mik
 * `req_id` 2 byte little-endian; `0x0000` dicadangkan.
 * Clean session true; subscription dipasang ulang setiap connect; cache deduplikasi dibersihkan saat connect.
 * Perintah tidak di-retain; telemetri state di-retain.
-* `status` dipublish setiap 3 detik dan retained untuk last-known; gateway tetap mewajibkan status fresh (10 detik) sebelum dispatch.
+* `status` dipublish saat berubah dan retained untuk last-known; gateway menuntut heartbeat `online` fresh (≤ 30 detik) dan status retained `IDLE` sebelum dispatch.
 * `online` retained dengan LWT `0`; robot mem-publish `online = 0` sebelum disconnect normal.
-* `IDLE` adalah sinyal kesiapan robot, tetapi gateway juga wajib menunggu status fresh, `graph_version` cocok, dan maintenance nonaktif sebelum mengirim job berikutnya.
+* `IDLE` adalah sinyal kesiapan robot, tetapi gateway juga wajib menunggu heartbeat fresh, `graph_version` cocok, kapasitas sampah < 95%, dan maintenance nonaktif sebelum mengirim job berikutnya.
 
 ## 7.6 Catatan Perilaku Khusus Task Executor
 
 * **Interaksi dwell memakai IR tangan**: sensor FC-51 di dekat bukaan tempat sampah (`GPIO 13`, `LOW` = tangan terdeteksi) me-reset timer dwell selama tangan pengguna berada di area bukaan. Kode status `OBSTACLE` (`0x04`) hanya dicadangkan dan tidak pernah dipublish.
-* **Kapasitas sampah**: HC-SR04 internal mengukur jarak ke permukaan sampah, lalu firmware mem-publish persentase 0–100% ke `adam/srv/trash`.
+* **Kapasitas sampah**: HC-SR04 internal mengukur jarak ke permukaan sampah, lalu firmware mem-publish persentase 0–100% ke `adam/srv/trash` saat boot dan setelah penutup ditutup. Selama nilai ≥ `SENSORS_TRASH_FULL_PERCENT` (95%), `moveto` baru dibalas `ack TRASH_FULL`; `reset` tetap diterima.
 * **Anti false-arrival**: setelah tiba di satu node, persimpangan harus menghilang dari pandangan sensor sebelum node berikutnya boleh terdeteksi.
 * **Ack dan error tidak boleh tertukar**: `ack` hanya untuk penerimaan job; kegagalan navigasi selalu lewat `error` dengan `req_id` yang sama.

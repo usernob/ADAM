@@ -7,8 +7,9 @@ Dokumen ini mendefinisikan protokol target: **Gateway Node** memegang antrean, r
 ## 6.1 Prinsip Protokol
 
 * Gateway adalah pemilik antrean dan satu-satunya pihak yang boleh mengirim `moveto`.
-* Robot memiliki **mailbox 1 slot** dan hanya menerima job saat status `IDLE` serta graf sudah siap.
+* Robot memiliki **mailbox 1 slot** dan hanya menerima job saat status `IDLE`, graf sudah siap, **dan kapasitas sampah di bawah ambang penuh (95%)**.
 * Semua perintah dan telemetri MQTT memakai **payload biner**, bukan JSON.
+* Telemetri bersifat **event-driven**: `status`, `current_pos`, dan `trash` hanya dipublish saat kejadian; `battery` periodik tiap 30 detik; `online` dipublish tiap 10 detik sebagai **heartbeat liveness**. Karena `status` tidak lagi periodik, kesegaran dispatch ditentukan oleh heartbeat.
 * Setiap perintah yang membutuhkan hasil memakai `req_id` 2 byte untuk korelasi `moveto` → `ack`/`error`.
 * Graf adalah artefak deployment: robot hanya memuatnya saat boot. Gateway menahan dispatch sampai versi graf robot sama dengan versi graf aktif.
 * Node memakai ASCII huruf kapital `A`–`Z`. Label harus unik, `A` wajib ada, dan satu graf maksimal 26 node. Label **tidak harus berurutan**; contoh `A, C, F` valid.
@@ -38,7 +39,7 @@ Dokumen ini mendefinisikan protokol target: **Gateway Node** memegang antrean, r
 | **`GET /api/admin/queue`** | GET | Admin | Melihat seluruh request aktif dan antrean. |
 | **`POST /api/admin/queue/clear`** | POST | Admin | Membatalkan request `queued`; request aktif tidak dihentikan. |
 | **`GET /api/admin/logs`** | GET | Admin | Riwayat kejadian sistem dan request. |
-| **`GET /healthz`** | GET | Publik (read-only) | Status gateway, SQLite, MQTT, online/offline robot, status freshness, maintenance, dan kecocokan versi graf. |
+| **`GET /healthz`** | GET | Publik (read-only) | Status gateway, SQLite, MQTT, online/offline robot, kesegaran heartbeat, maintenance, dan kecocokan versi graf. |
 
 Akses admin memakai session cookie `HttpOnly`, `Secure`, `SameSite=Lax`. Tidak ada registrasi publik. Akun admin hanya dibuat/di-reset lewat CLI server (lihat [docs/10-deployment.md](10-deployment.md)).
 
@@ -63,9 +64,10 @@ Urutan pemeriksaan:
 2. Cek mode maintenance.
 3. Cek robot online dan tidak `ERROR`.
 4. Cek `graph_version` robot sama dengan versi graf aktif.
-5. Deduplikasi target.
-6. Rate limit.
-7. Kapasitas antrean.
+5. Cek kapasitas sampah terakhir yang diketahui (retained `adam/srv/trash` < 95%).
+6. Deduplikasi target.
+7. Rate limit.
+8. Kapasitas antrean.
 
 Deduplikasi dicek sebelum rate limit agar klik berulang pada node yang sama tetap mengembalikan request yang sama, bukan `429`.
 
@@ -81,6 +83,7 @@ Respons:
 | Robot sedang `ERROR` | `409` | `robot_error` | Menunggu admin reset. |
 | Gateway dalam mode maintenance | `503` | `maintenance` | Tidak ada request yang dibuat. |
 | `graph_version` robot belum cocok | `503` | `graph_update` | Robot harus reboot dan memuat graf yang sama. |
+| Tempat sampah penuh (≥ 95%) | `503` | `bin_full` | Tidak ada request dibuat; coba lagi setelah wadah dikosongkan. |
 | Robot offline | `503` | `robot_offline` | Coba lagi setelah robot online. |
 | Terlalu sering | `429` | `rate_limited` | Sertakan `Retry-After`. |
 | Antrean penuh | `429` | `queue_full` | Kapasitas default 20 request `queued`. |
@@ -255,7 +258,7 @@ Status request:
 Alur normal:
 
 1. `POST /api/call` membuat request `queued`.
-2. Gateway memilih request `queued` tertua hanya jika robot `online`, status `IDLE` masih fresh, tidak ada request aktif, maintenance nonaktif, **dan `graph_version` robot sama dengan versi graf aktif**.
+2. Gateway memilih request `queued` tertua hanya jika robot `online` dan heartbeat fresh (≤ 30 detik), status retained `IDLE`, kapasitas sampah < 95%, tidak ada request aktif, maintenance nonaktif, **dan `graph_version` robot sama dengan versi graf aktif**.
 3. Gateway mengubah status menjadi `dispatched` dan mengirim `srv/adam/moveto` berisi `req_id` + node.
 4. Robot membalas `adam/srv/ack`.
    * `ACCEPTED` → request menjadi `serving`.
@@ -263,34 +266,37 @@ Alur normal:
    * `NOT_READY` → jika robot `ERROR`, request menjadi `failed`; jika hanya belum siap, kembalikan ke `queued`.
    * `DUPLICATE` → anggap `serving` (ack sebelumnya kemungkinan hilang).
    * `QUEUE_FULL`/`INVALID_TARGET` → request menjadi `failed`.
+   * `TRASH_FULL` → request menjadi `failed`; kapasitas sampah harus dikurangi dulu sebelum panggilan baru bisa diterima robot.
 5. Robot bergerak, lalu `DWELL` di target. Gateway tetap menandai `serving`.
 6. Robot selesai dwell, mem-publish `IDLE` dan `current_pos = [target][0]`. Gateway menandai `done`.
-7. Gateway baru boleh mengirim job berikutnya setelah menerima `IDLE` fresh dan versi graf robot cocok.
+7. Gateway baru boleh mengirim job berikutnya setelah heartbeat fresh, status `IDLE`, dan versi graf robot cocok.
 
 Aturan penting:
 
 * **Satu request aktif.** Gateway tidak boleh mengirim `moveto` kedua selama masih ada request `dispatched`/`serving`.
 * **Tidak ada antrean di robot.** Robot hanya punya mailbox 1 slot; seluruh backlog ada di gateway.
 * **Graph version gate.** Gateway tidak boleh mengirim `moveto` jika `graph_version` robot `0` atau berbeda dari versi graf aktif. Panggilan baru ditolak `503 graph_update`.
-* **Status gate.** Gateway tidak boleh mengirim `moveto` jika status terakhir bukan `IDLE` atau sudah lebih dari 10 detik tidak ada status fresh.
+* **Heartbeat gate.** Gateway tidak boleh mengirim `moveto` jika heartbeat `online` terakhir lebih dari 30 detik, atau status retained bukan `IDLE`.
+* **Trash gate.** Gateway tidak boleh mengirim `moveto` jika retained `adam/srv/trash` ≥ 95%; panggilan baru ditolak `503 bin_full` sampai kapasitas turun.
 * **Ack timeout** default 10 detik. Jika `ack` tidak datang, gateway mencocokkan dengan status/posisi retained. Jika tetap tidak jelas, request menjadi `failed` dan dispatch dihentikan sampai robot kembali `IDLE`.
 * **Job lease** default 10 menit. Jika robot offline atau tidak ada heartbeat melewati batas, request aktif menjadi `failed`.
-* **Gateway restart**: request `queued` tetap ada di SQLite. Status retained hanya ditampilkan sebagai last-known dan belum dihitung fresh; gateway tidak mengirim job baru sampai menerima status fresh dan `IDLE`.
+* **Gateway restart**: request `queued` tetap ada di SQLite. Status retained hanya ditampilkan sebagai last-known; gateway tidak mengirim job baru sampai heartbeat fresh diterima dan status retained `IDLE`.
 
 ### Kesiapan Robot
 
 Gateway hanya boleh melakukan dispatch jika seluruh kondisi berikut terpenuhi:
 
 1. `online = 1` (retained + LWT).
-2. Ada pesan `status` yang diterima dalam **10 detik** terakhir.
-3. Status terbaru adalah `IDLE`.
+2. Ada pesan heartbeat `adam/srv/online` (`0x01`) yang diterima dalam **30 detik** terakhir.
+3. Status retained terbaru adalah `IDLE`.
 4. `graph_version` robot sama dengan versi graf aktif dan bukan `0`.
 5. Tidak ada request aktif.
 6. Maintenance nonaktif.
+7. Retained `adam/srv/trash` di bawah **95%**.
 
-`status` retained adalah **last known status**, bukan bukti bahwa robot siap sekarang. Setelah gateway restart, gateway menunggu status fresh berikutnya (startup grace maksimum 10 detik) sebelum dispatch. Jika tidak ada status selama 10 detik, `ready = false`, dispatch dihentikan, dan UI menampilkan status `stale`; `online` tidak diubah menjadi `0` hanya karena timeout status.
+`status` retained adalah **last known status**, bukan bukti bahwa robot siap sekarang; bukti kesiapan adalah heartbeat. Setelah gateway restart, gateway menunggu heartbeat pertama (startup grace maksimum 30 detik) sebelum dispatch. Jika tidak ada heartbeat selama 30 detik, `ready = false`, dispatch dihentikan, dan UI menampilkan status `stale`; `online` tidak diubah menjadi `0` hanya karena timeout heartbeat.
 
-Robot mem-publish `status` setiap **3 detik** agar timeout 10 detik tidak terus-menerus memblokir dispatch.
+Robot mem-publish `status` **hanya saat berubah**; kedatangan pesan `status` tidak lagi menjadi penanda kesegaran. Kesegaran dispatch ditentukan oleh heartbeat `online` setiap **10 detik**.
 
 ### Kebijakan saat robot `ERROR`
 
@@ -309,7 +315,7 @@ Admin reset juga membatalkan request aktif/antrean sebelum mengirim `srv/adam/re
 4. Admin mengubah marka/lintasan fisik bila perlu, lalu mematikan robot, memindahkannya ke Home `A` menghadap Utara, dan menyalakannya kembali.
 5. Saat boot, robot mengunduh `GET /graph.bin` (maksimal 3 percobaan) dan mem-publish `adam/srv/graph_version`.
 6. Jika fetch gagal, robot mem-publish `graph_version = 0`, `status = ERROR`, dan tidak mencoba lagi sampai reboot. Jika berhasil, robot mem-publish versi sebenarnya dan `status = IDLE`.
-7. Gateway membandingkan versi. Setelah versi cocok dan status fresh `IDLE`, admin menonaktifkan maintenance dan dispatch dilanjutkan.
+7. Gateway membandingkan versi. Setelah versi cocok, heartbeat fresh, dan status `IDLE`, admin menonaktifkan maintenance dan dispatch dilanjutkan.
 
 Rollback memakai prosedur yang sama, tetapi graf baru dibuat dari snapshot riwayat lewat `POST /api/admin/graph/rollback`. Nomor versi tetap naik.
 
@@ -327,7 +333,7 @@ Tidak ada jalur update graf di tengah job. Jika robot reboot tak terduga ketika 
 * Gateway terhubung ke Mosquitto lokal (`mqtt://127.0.0.1:1883`).
 * Opsi fallback MQTT langsung: `mqtts://vps.example.com:8883` dengan port mapping dan sertifikat DNS-01 (lihat [docs/10-deployment.md](10-deployment.md)).
 * Tidak ada anonymous access. ACL memisahkan hak gateway dan robot.
-* Last Will and Testament: `adam/srv/online` payload `0x00`, retain `true`. Saat connect, robot mem-publish `0x01`. Sebelum disconnect normal, robot wajib mem-publish `0x00` sendiri karena broker tidak mem-publish LWT pada clean disconnect.
+* Last Will and Testament: `adam/srv/online` payload `0x00`, retain `true`. Saat connect, robot mem-publish `0x01`, lalu mengulangnya **tiap 10 detik** sebagai heartbeat. Sebelum disconnect normal, robot wajib mem-publish `0x00` sendiri karena broker tidak mem-publish LWT pada clean disconnect. Gateway menganggap robot fresh jika heartbeat terakhir ≤ 30 detik.
 
 ### Prinsip Wire Format
 
@@ -343,20 +349,20 @@ Tidak ada jalur update graf di tengah job. Jika robot reboot tak terduga ketika 
 
 | Topik | Arah | Payload | QoS | Retain | Deskripsi |
 | :--- | :--- | :--- | :---: | :---: | :--- |
-| `srv/adam/moveto` | Server → Robot | `[req_id:2][node:1]` | 1 | False | Perintah menuju satu node. Hanya dikirim saat robot `IDLE`, status fresh, dan versi graf cocok. |
+| `srv/adam/moveto` | Server → Robot | `[req_id:2][node:1]` | 1 | False | Perintah menuju satu node. Hanya dikirim saat robot `IDLE`, heartbeat fresh, kapasitas < 95%, dan versi graf cocok. |
 | `srv/adam/reset` | Server → Robot | *(kosong)* | 1 | False | Admin reset: batalkan job, kembali ke Home `A`, menghadap Utara. Tidak memuat ulang graf. |
 | `adam/srv/ack` | Robot → Server | `[req_id:2][result:1]` | 1 | False | Konfirmasi penerimaan perintah. |
 | `adam/srv/error` | Robot → Server | `[req_id:2][code:1]` | 1 | False | Error yang terkait request; `req_id = 0` untuk error global. |
 | `adam/srv/current_pos` | Robot → Server | `[current:1][next:1]` | 1 | **True** | Node terakhir dan node yang sedang dituju. `next = 0` jika tidak ada. |
-| `adam/srv/status` | Robot → Server | 1 byte kode status | 1 | **True** | Status operasional robot; dipublish setiap 3 detik. |
+| `adam/srv/status` | Robot → Server | 1 byte kode status | 1 | **True** | Status operasional robot; dipublish saat berubah (event-driven). |
 | `adam/srv/graph_version` | Robot → Server | `[version:4]` little-endian | 1 | **True** | Versi graf yang aktif di robot; `0` = graf belum siap. |
-| `adam/srv/battery` | Robot → Server | 1 byte (`0`–`100`) | 1 | **True** | Persentase baterai. |
-| `adam/srv/trash` | Robot → Server | 1 byte (`0`–`100`) | 1 | **True** | Persentase kapasitas sampah terisi. |
-| `adam/srv/online` | Robot → Server | `0x00`/`0x01` | 1 | **True** | Online/offline; `0x00` juga dikirim sebagai LWT. |
+| `adam/srv/battery` | Robot → Server | 1 byte (`0`–`100`) | 1 | **True** | Persentase baterai; dipublish periodik tiap 30 detik. |
+| `adam/srv/trash` | Robot → Server | 1 byte (`0`–`100`) | 1 | **True** | Persentase kapasitas sampah terisi; dipublish saat boot dan setelah penutup ditutup. Nilai ≥ 95% membuat `POST /api/call` ditolak `503 bin_full` dan `moveto` dibalas `ack TRASH_FULL`. |
+| `adam/srv/online` | Robot → Server | `0x00`/`0x01` | 1 | **True** | Online/offline sekaligus heartbeat liveness: `0x01` dipublish tiap 10 detik; `0x00` dikirim sebagai LWT dan sebelum disconnect normal. |
 
-`current_pos`, `battery`, dan `trash` dikirim saat berubah, ditambah snapshot periodik 30–60 detik. `status` dikirim setiap 3 detik. `graph_version` dikirim saat boot/perubahan. Semua state menggunakan retain agar subscriber baru langsung mendapat state terakhir.
+Kadensi bersifat **event-driven**: `status` dikirim saat berubah; `current_pos` saat mulai edge, tiba di node, `DWELL`, `IDLE`, dan `ERROR`; `trash` saat boot dan setelah penutup ditutup; `battery` periodik tiap 30 detik; `graph_version` saat boot/perubahan; `online` sebagai heartbeat tiap 10 detik. Tidak ada snapshot periodik untuk `current_pos` dan `trash`. Semua state menggunakan retain agar subscriber baru langsung mendapat state terakhir.
 
-`status` retained hanya untuk tampilan last-known. Gateway tetap mewajibkan status fresh (maksimal 10 detik) sebelum dispatch, dan tidak menganggap retained status sebagai bukti kesiapan.
+`status` retained hanya untuk tampilan last-known. Gateway tetap mewajibkan heartbeat fresh (maksimal 30 detik) sebelum dispatch, dan tidak menganggap retained status sebagai bukti kesiapan.
 
 Saat boot, robot mem-publish `graph_version = 0` **sebelum** `online = 1`, lalu mengunduh graf. Setelah graf siap, robot mem-publish versi sebenarnya. Jika fetch gagal setelah 3 percobaan, robot mem-publish `status = ERROR` dan tetap `graph_version = 0`; tidak ada retry otomatis sampai reboot. Dengan urutan ini gateway tidak pernah melihat state lama yang membuat robot dianggap siap padahal graf belum dimuat.
 
@@ -370,8 +376,11 @@ Saat boot, robot mem-publish `graph_version = 0` **sebelum** `online = 1`, lalu 
 | `0x03` | `DUPLICATE` | Pasangan `(req_id, node)` yang sama sudah pernah diterima. |
 | `0x04` | `INVALID_TARGET` | Byte node bukan `A`–`Z` atau payload tidak valid. Robot tidak memeriksa membership graf; itu tanggung jawab gateway. |
 | `0x05` | `NOT_READY` | Robot sedang boot, graf belum siap, atau status `ERROR`. |
+| `0x06` | `TRASH_FULL` | Tempat sampah penuh (kapasitas ≥ `SENSORS_TRASH_FULL_PERCENT`, default 95%). Robot tidak menerima job pindah baru sampai kapasitas turun di bawah ambang. |
 
-`BUSY` dan `NOT_READY` adalah pengaman. Gateway seharusnya sudah mencegah keduanya dengan hanya mengirim saat robot `online`, status fresh `IDLE`, dan `graph_version` cocok.
+`BUSY` dan `NOT_READY` adalah pengaman. Gateway seharusnya sudah mencegah keduanya dengan hanya mengirim saat robot `online`, heartbeat fresh, status retained `IDLE`, `graph_version` cocok, dan kapasitas di bawah ambang.
+
+`TRASH_FULL` adalah kondisi pengaman terakhir di sisi robot, bukan satu-satunya penghalang: gateway sudah wajib menahan dispatch dan menolak panggilan selama retained `adam/srv/trash` ≥ 95% (lihat **Trash gate**), sehingga `TRASH_FULL` seharusnya hanya muncul saat nilai retained belum ter-update atau pembacaan robot berbeda dengan cache gateway. `srv/adam/reset` tidak pernah ditolak karena kapasitas penuh, agar jalur recovery admin selalu terbuka.
 
 ### Kode `adam/srv/status`
 
@@ -399,6 +408,7 @@ Saat boot, robot mem-publish `graph_version = 0` **sebelum** `online = 1`, lalu 
 srv/adam/moveto        payload 34 12 43       -> req_id 0x1234, target node 'C'
 adam/srv/ack           payload 34 12 00       -> req_id 0x1234, ACCEPTED
 adam/srv/ack           payload 34 12 01       -> req_id 0x1234, BUSY
+adam/srv/ack           payload 34 12 06       -> req_id 0x1234, TRASH_FULL
 adam/srv/error         payload 34 12 01       -> req_id 0x1234, NO_PATH
 adam/srv/current_pos   payload 42 43          -> di 'B', menuju 'C'
 adam/srv/current_pos   payload 42 00          -> di 'B', tidak menuju node lain

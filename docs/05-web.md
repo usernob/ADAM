@@ -45,6 +45,7 @@ Antarmuka web melayani pemanggilan dan visualisasi *real-time* melalui **HTTP**,
    * **Publik, tanpa login.** Dibatasi *rate limit* dan deduplikasi target.
    * Menampilkan posisi robot (`current` dan `next`), status, baterai, serta daftar antrean aktif.
    * Jika target sudah ada di antrean atau sedang dituju, tombol tidak menambah antrean baru; UI menampilkan pesan seperti “Rute ke Node A sudah dijadwalkan”.
+   * Jika panggilan ditolak gateway (`maintenance`, `robot_offline`, `graph_update`, `bin_full`), tombol menampilkan pesan tanpa menambah antrean. Untuk `bin_full`, UI menyebut tempat sampah penuh dan menampilkan persentase dari `trash`.
 
 2. **Halaman Visualisasi Graf & Peta (`/map` atau `/viewer`)**:
    * Menampilkan denah graf secara visual dari `GET /api/graph`.
@@ -69,7 +70,7 @@ Antarmuka web melayani pemanggilan dan visualisasi *real-time* melalui **HTTP**,
 
 * Gateway memegang antrean; robot hanya memiliki **mailbox 1 slot**.
 * Hanya satu request yang boleh *in-flight* pada satu waktu.
-* Dispatch hanya dilakukan jika robot `online`, status `IDLE` masih fresh (maksimal 10 detik), tidak ada request aktif, maintenance nonaktif, dan `graph_version` robot sama dengan versi graf aktif.
+* Dispatch hanya dilakukan jika robot `online` dan heartbeat fresh (maksimal 30 detik), status retained `IDLE`, kapasitas sampah < 95%, tidak ada request aktif, maintenance nonaktif, dan `graph_version` robot sama dengan versi graf aktif.
 * Jika versi graf belum cocok, `POST /api/call` ditolak `503 graph_update`; tidak ada request baru yang masuk antrean. UI menampilkan status maintenance sampai robot reboot.
 * Sebelum menyimpan graf, admin mengaktifkan maintenance lewat `POST /api/admin/maintenance`; ini menghentikan panggilan baru dan dispatch antrean. `POST /save` ditolak `409` selama masih ada request aktif atau antrean.
 * Request memiliki status: `queued`, `dispatched`, `serving`, `done`, `failed`, `cancelled`.
@@ -86,10 +87,10 @@ Gateway menjadi **MQTT-to-SSE Bridge**. Setiap client yang terhubung menerima sn
 
 | Event | Data | Keterangan |
 | :--- | :--- | :--- |
-| `snapshot` | `{ pos, status, status_fresh, battery, trash, online, maintenance, graph: { gateway_version, robot_version, ready }, queue }` | Dikirim sekali saat koneksi SSE dibuka |
+| `snapshot` | `{ pos, status, fresh, battery, trash, online, maintenance, graph: { gateway_version, robot_version, ready }, queue }` | Dikirim sekali saat koneksi SSE dibuka |
 | `pos_update` | `{ current, next }` | `next = null`/`0` berarti robot tidak sedang menuju node lain |
 | `status_update` | `IDLE`, `MOVING`, `DWELL`, `ERROR` | Status operasional robot |
-| `status_fresh_update` | `true`/`false` | `false` jika tidak ada status baru selama 10 detik; dispatch dihentikan |
+| `fresh_update` | `true`/`false` | `false` jika tidak ada heartbeat `online` selama 30 detik; dispatch dihentikan |
 | `graph_update` | `{ gateway_version, robot_version, ready }` | `ready` = versi robot sama dengan versi gateway dan bukan `0`; client dapat memuat ulang `GET /api/graph` saat versi gateway berubah |
 | `maintenance_update` | `true`/`false` | Mode maintenance aktif/nonaktif |
 | `battery_update` | `0`–`100` | Persentase baterai |
@@ -98,8 +99,8 @@ Gateway menjadi **MQTT-to-SSE Bridge**. Setiap client yang terhubung menerima sn
 | `call_result` | `{ request_id, status, message }` | Hasil request untuk pemanggil |
 | `online_update` | `true`/`false` | Berdasarkan topik LWT `adam/srv/online` |
 
-* `status` retained adalah **last known status** untuk tampilan. Gateway baru menganggap status fresh jika ada pesan baru dalam 10 detik terakhir.
-* Jika status tidak fresh, UI menampilkan indikator `stale`; jangan menampilkan robot sebagai siap menerima job.
+* `status` retained adalah **last known status** untuk tampilan. Gateway baru menganggap robot fresh jika ada heartbeat `online` dalam 30 detik terakhir.
+* Jika `fresh = false`, UI menampilkan indikator `stale`; jangan menampilkan robot sebagai siap menerima job.
 * Kirim komentar heartbeat setiap 15 detik agar koneksi tidak diputus proxy.
 * Client menggunakan `EventSource` dan reconnect otomatis.
 * Tidak ada Supabase Realtime; SSE adalah satu-satunya jalur *live update* dari gateway.

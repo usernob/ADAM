@@ -138,7 +138,7 @@ Aturan:
 * Gateway hanya boleh menulis perintah dan membaca telemetri.
 * Robot hanya boleh menulis telemetri dan membaca perintah.
 * Retain hanya untuk state telemetri (`current_pos`, `status`, `graph_version`, `battery`, `trash`, `online`), bukan perintah.
-* `status` retained adalah last-known untuk web. Gateway tetap mewajibkan status fresh maksimal 10 detik sebelum dispatch; robot mem-publish status setiap 3 detik.
+* `status` retained adalah last-known untuk web. Gateway tetap mewajibkan heartbeat `online` fresh maksimal 30 detik sebelum dispatch; robot mem-publish heartbeat tiap 10 detik, sedangkan `status` hanya saat berubah.
 * Clean session `true` di robot; subscription dipasang ulang setiap connect.
 * Gunakan QoS 1 untuk seluruh perintah dan telemetri.
 
@@ -154,6 +154,7 @@ Username   : robot
 Password   : <secret>
 Clean session : true
 Keepalive  : 30 detik
+Heartbeat  : adam/srv/online = 0x01 tiap 10 detik (retain)
 LWT        : adam/srv/online = 0x00, retain
 ```
 
@@ -192,7 +193,7 @@ Semua state persisten berada di `data/adam.db`:
 * `graph_versions` — riwayat immutable setiap versi: body matriks 676 byte, daftar node/edge, timestamp.
 * `graph` — pointer ke versi graf aktif dan timestamp deployment.
 * `settings` — flag maintenance dan konfigurasi gateway yang harus bertahan saat restart.
-* `robot_state`/cache — versi graf terakhir yang dilaporkan robot, status freshness, dan timestamp telemetry.
+* `robot_state`/cache — versi graf terakhir yang dilaporkan robot, kesegaran heartbeat, dan timestamp telemetry.
 * `logs` — audit dan kejadian sistem.
 
 Versi graf pertama adalah `1`; `0` dicadangkan untuk “graf belum siap”. Setiap save/rollback menambah baris baru di `graph_versions`; baris lama tidak diubah.
@@ -289,10 +290,10 @@ systemctl enable --now adam-gateway
 
 ## 10.10 Observability & Operasional
 
-* `GET /healthz` memeriksa gateway, SQLite, koneksi MQTT, status online robot, status freshness, maintenance, dan kecocokan versi graf.
+* `GET /healthz` memeriksa gateway, SQLite, koneksi MQTT, status online robot, kesegaran heartbeat, maintenance, dan kecocokan versi graf.
 * Log gateway ke journald/PM2; log Mosquitto ke file dengan rotasi.
 * Pantau disk, memori, dan uptime.
-* Alert sederhana jika robot offline, MQTT disconnect, SQLite gagal dibuka, status tidak fresh lebih dari 10 detik, maintenance aktif terlalu lama, atau `graph_version` robot tidak cocok dengan graf aktif.
+* Alert sederhana jika robot offline, MQTT disconnect, SQLite gagal dibuka, heartbeat `online` hilang lebih dari 30 detik, maintenance aktif terlalu lama, atau `graph_version` robot tidak cocok dengan graf aktif.
 * Sertakan `request_id`/`req_id` di log untuk melacak satu panggilan dari HTTP sampai `ack`/`error`.
 
 ## 10.11 Deployment Graf
@@ -305,7 +306,7 @@ Graf hanya diaktifkan saat robot boot. Tidak ada refresh graf saat robot sedang 
 4. Jika ada perubahan marka/lintasan fisik, lakukan **sekarang**, saat robot berhenti. Software tidak dapat memverifikasi kesesuaian graf dengan lantai.
 5. Pastikan antrean masih kosong dan maintenance tetap aktif. Matikan robot, pindahkan ke Home `A` menghadap Utara, lalu nyalakan kembali.
 6. Robot mengunduh `GET /graph.bin` secara atomic (header versi dan body 676 byte dari snapshot yang sama). Robot memvalidasi HTTP 200, `X-Graph-Version` bukan `0`, dan body 676 byte; maksimal 3 percobaan dengan jeda 2 detik. Setelah berhasil, robot mem-publish `adam/srv/graph_version`.
-7. Gateway membandingkan versi. Setelah versi cocok dan status fresh `IDLE`, nonaktifkan maintenance. Dispatch baru dilanjutkan.
+7. Gateway membandingkan versi. Setelah versi cocok, heartbeat fresh, dan status `IDLE`, nonaktifkan maintenance. Dispatch baru dilanjutkan.
 
 Jika langkah 6 gagal setelah 3 percobaan, robot mem-publish `graph_version = 0`, `status = ERROR`, dan tidak retry otomatis sampai reboot. Gateway tetap menahan dispatch. Jangan mengirim graf lewat MQTT atau memaksa robot menerima job dengan graf lama.
 
