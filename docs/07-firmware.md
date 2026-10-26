@@ -45,7 +45,7 @@ Firmware dijalankan menggunakan Sistem Operasi Real-Time (**FreeRTOS**) pada mik
    * Jika byte target bukan `A`–`Z` → `ack INVALID_TARGET`. Robot tidak memvalidasi ulang apakah node itu aktif di graf; gateway adalah source of truth dan hanya mengirim node aktif.
    * Jika tidak `IDLE` atau mailbox terisi → `ack BUSY`.
    * Jika kapasitas sampah ≥ `SENSORS_TRASH_FULL_PERCENT` (default 95%, baca `sensors_trash_level_percent()` saat request masuk) → `ack TRASH_FULL`. Robot menolak seluruh `moveto` baru sampai kapasitas di bawah ambang; tidak ada job yang diantre selama penuh. `srv/adam/reset` tetap diterima.
-   * Masukkan `{req_id, node}` ke mailbox 1 slot. Periksa hasil `xQueueSend`; jika gagal → `ack BUSY`.
+   * Masukkan `{req_id, node}` ke mailbox 1 slot. Periksa hasil `xQueueSend`; jika gagal berarti mailbox penuh → `ack QUEUE_FULL` (bukan `BUSY`), sesuai tabel kode ack di `06-protocol.md`. `BUSY` hanya untuk status tidak `IDLE` atau mailbox sudah terisi sebelum pengiriman.
    * Kirim `ack ACCEPTED` setelah job benar-benar masuk mailbox. Ack berarti “diterima”, bukan “rute sudah ditemukan”.
 
 3. **Menghitung rute**

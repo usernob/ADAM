@@ -38,6 +38,11 @@
 #define SENSORS_TRASH_EMPTY_CM 30.0f
 #define SENSORS_TRASH_FULL_CM 5.0f
 
+/* Level (0..100) at which the bin counts as full: move requests are rejected
+ * until the level drops below it again. Kept slightly below 100 so ultrasonic
+ * noise at the very edge does not flip the decision. */
+#define SENSORS_TRASH_FULL_PERCENT 95
+
 // Buzzer indicator + battery divider ADC
 #define SENSORS_PIN_BUZZER 2
 #define SENSORS_PIN_BATTERY_ADC 36 // GPIO36 = ADC1_CH0
