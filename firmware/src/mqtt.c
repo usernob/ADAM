@@ -4,16 +4,17 @@
 #include "esp_err.h"
 #include "esp_event_base.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "executor.h"
 #include "freertos/idf_additions.h"
 #include "freertos/projdefs.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "graph.h"
-#include "graph_fetch.h"
 #include "mqtt_client.h"
 #include "path_resolver.h"
 #include "portmacro.h"
+#include "protocol.h"
 #include "sdkconfig.h"
 #include "sensors.h"
 #include <inttypes.h>
@@ -27,39 +28,47 @@
 
 static const char* TAG = "mqtt";
 
-// Interval of the periodic battery/status/pos/trash telemetry (3 seconds)
-#define TELEMETRY_INTERVAL_MS 3000
+#define HEARTBEAT_INTERVAL_MS 10000
+#define BATTERY_INTERVAL_MS 30000
 
 static QueueHandle_t s_job_queue;
 static QueueHandle_t s_event_data_queue;
 
 static esp_mqtt_client_handle_t s_client;
 
-// Telemetry task, low priority so it does not disturb the MQTT socket task
+// The only periodic messages of the protocol (07:106,108), low priority so it
+// never disturbs the MQTT socket task.
 static void telemetry_task(void* pvParameters) {
+    TickType_t last_battery = xTaskGetTickCount();
     for (;;) {
-        uint8_t battery = sensors_battery_percent();
-        uint8_t trash = sensors_trash_level_percent();
-        char pos = (char)(path_resolver_current() + 'A');
-        uint8_t status = (uint8_t)executor_status();
+        // send heartbeat online every 10 seconds
+        mqtt_publish_u8(MQTT_ONLINE_TOPIC, 0x01, 1, true);
 
-        // docs/06-protocol.md: raw 1-byte payloads, battery/status/pos/trash
-        // retained true, QoS 1
-        mqtt_publish(MQTT_BATTERY_TOPIC, (const char*)&battery, 1, 1, true);
-        mqtt_publish(MQTT_TRASH_TOPIC, (const char*)&trash, 1, 1, true);
-        mqtt_publish(MQTT_STATUS_TOPIC, (const char*)&status, 1, 1, true);
-        mqtt_publish(MQTT_CURRENT_POS_TOPIC, &pos, 1, 1, true);
+        // send battery every 30 seconds
+        TickType_t now = xTaskGetTickCount();
+        if ((now - last_battery) >= pdMS_TO_TICKS(BATTERY_INTERVAL_MS)) {
+            last_battery = now;
+            uint8_t battery = sensors_battery_percent();
+            mqtt_publish(MQTT_BATTERY_TOPIC, (const char*)&battery, 1, 1, true);
+        }
 
-        ESP_LOGI(TAG, "Telemetry: pos=%c status=%d battery=%d%% trash=%d%%", pos, status, battery, trash);
-
-        vTaskDelay(pdMS_TO_TICKS(TELEMETRY_INTERVAL_MS));
+        vTaskDelay(pdMS_TO_TICKS(HEARTBEAT_INTERVAL_MS));
     }
 }
 
-/* MQTT_EVENT_DATA and its topic/data buffers are owned by the esp-mqtt task
- * and recycled the moment this handler returns, so the validation task must
- * never hold a pointer into them: every byte it needs is copied into this
- * queue-safe value first. */
+// online = 0 before a clean disconnect; the LWT only covers abnormal ones
+// (06:336). Registered as an esp_restart() shutdown handler, the delay flushes it.
+static void publish_offline(void) {
+    if (s_client == NULL) {
+        return;
+    }
+    ESP_LOGI(TAG, "Clean disconnect: publishing online = 0");
+    mqtt_publish_u8(MQTT_ONLINE_TOPIC, 0x00, 1, true);
+    vTaskDelay(pdMS_TO_TICKS(200));
+}
+
+// esp-mqtt recycles MQTT_EVENT_DATA buffers when the handler returns, so every
+// byte the validation task needs is copied into this queue-safe value first.
 #define MQTT_MSG_TOPIC_MAX 32
 #define MQTT_MSG_DATA_MAX 4 /* docs/06-protocol.md:345 - command payload max 3 byte */
 
@@ -74,16 +83,12 @@ static inline bool cmp_topic(const mqtt_msg_t* msg, const char* topic) {
     return msg->topic_len == (int)strlen(topic) && memcmp(msg->topic, topic, (size_t)msg->topic_len) == 0;
 }
 
-/* req_id on the wire is 2 byte little-endian (docs/06-protocol.md:342,
- * example moveto 34 12 43 -> req_id 0x1234, node 'C'). The parser and
- * publish_ack() are the only places that touch the wire format, so both
- * directions of the round trip change together here. */
+// req_id is 2 byte little-endian (06:342: 34 12 43 -> 0x1234, node 'C')
 static uint16_t parse_req_id(const char* data) {
     return (uint16_t)((uint8_t)data[0] | ((uint16_t)(uint8_t)data[1] << 8));
 }
 
-/* Single writer for adam/srv/ack: [req_id:2 little-endian][result:1], QoS 1,
- * retain false (docs/06-protocol.md:354 - commands are never retained). */
+// Single writer for adam/srv/ack: [req_id:2 LE][result:1], QoS 1, no retain (06:354)
 static void publish_ack(uint16_t req_id, adam_ack_t result) {
     uint8_t payload[3];
     payload[0] = (uint8_t)(req_id & 0xff);
@@ -92,13 +97,8 @@ static void publish_ack(uint16_t req_id, adam_ack_t result) {
     mqtt_publish(MQTT_ACK_TOPIC, (const char*)payload, 3, 1, false);
 }
 
-/* Dedup cache of accepted (req_id, node) pairs - docs/07-firmware.md:43: a
- * QoS 1 retransmission is answered DUPLICATE instead of running the job
- * twice, and that check runs before BUSY. Dropped on every connect
- * (docs/07-firmware.md:122) because clean session is true. Ring buffer, the
- * oldest pair is overwritten; req_id 0x0000 is never stored because it is
- * reserved (docs/07-firmware.md:121). Written by the MQTT event task on
- * reconnect and by the validation task, hence the spinlock. */
+// (req_id, node) dedup: a QoS 1 retry gets DUPLICATE, never a second job (07:43).
+// Ring buffer, written by two tasks, cleared on every connect (07:122).
 #define DEDUP_CACHE_SIZE 8
 
 typedef struct {
@@ -126,7 +126,7 @@ static bool dedup_contains(uint16_t req_id, char node) {
 
 static void dedup_remember(uint16_t req_id, char node) {
     if (req_id == 0x0000) {
-        return;
+        return; // 0x0000 is reserved (07:121)
     }
     portENTER_CRITICAL(&s_dedup_mux);
     s_dedup[s_dedup_next] = (dedup_entry_t){.req_id = req_id, .node = node, .used = true};
@@ -141,15 +141,6 @@ static void dedup_clear(void) {
     portEXIT_CRITICAL(&s_dedup_mux);
 }
 
-/* docs/07-firmware.md:44 - "graf belum siap". There is no graph_version topic
- * yet (TODO.md item 7), so readiness is taken from graph_get(): false until
- * Task Fetch installs the matrix, and after a failed fetch. */
-static bool graph_ready(void) {
-    const uint8_t* edges;
-    size_t count;
-    return graph_get(&edges, &count);
-}
-
 static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_t event_id, void* event_data) {
     ESP_LOGD(TAG, "Event dispatched from event loop base=%s, event_id=%" PRIi32, base, event_id);
     esp_mqtt_event_handle_t event = event_data;
@@ -158,8 +149,23 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_
     case MQTT_EVENT_CONNECTED:
         ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
 
-        // docs/07-firmware.md:122 - the dedup cache never survives a reconnect
+        // the dedup cache never survives a reconnect (07:122)
         dedup_clear();
+
+        // graph_version first (0 = not ready), then online = 1 (07:37)
+        mqtt_publish_graph_version(graph_version());
+        mqtt_publish_u8(MQTT_ONLINE_TOPIC, 0x01, 1, true);
+
+        // battery, trash and pos have no other trigger than connect (07:39,111)
+        uint8_t battery = sensors_battery_percent();
+        uint8_t trash = sensors_trash_level_percent();
+        mqtt_publish(MQTT_BATTERY_TOPIC, (const char*)&battery, 1, 1, true);
+        mqtt_publish(MQTT_TRASH_TOPIC, (const char*)&trash, 1, 1, true);
+        // while MOVING the retained [current][next] of the running edge is right
+        if (executor_status() != ADAM_STATUS_MOVING) {
+            uint8_t pos[2] = {(uint8_t)('A' + path_resolver_current()), 0};
+            mqtt_publish(MQTT_CURRENT_POS_TOPIC, (const char*)pos, 2, 1, true);
+        }
 
         int msg_id = esp_mqtt_client_subscribe(client, MQTT_MOVE_TOPIC, 1);
         ESP_LOGI(TAG, "sent subscribe moveto, msg_id=%d", msg_id);
@@ -239,43 +245,38 @@ static void event_validation_task(void* pvParameters) {
                 uint16_t req_id = msg.data_len >= 2 ? parse_req_id(msg.data) : 0;
 
                 if (msg.data_len < 3) {
-                    // docs/06-protocol.md:377 - an invalid payload is answered
-                    // with INVALID_TARGET; returning here would tear down the
-                    // task and swallow every command after it.
+                    // 06:377 - invalid payload -> INVALID_TARGET; returning here
+                    // would tear down the task and swallow later commands
                     publish_ack(req_id, ADAM_ACK_INVALID_TARGET);
                     continue;
                 }
 
                 adam_ack_t ack_status = ADAM_ACK_ACCEPTED;
-                mqtt_job_t job = {
-                    .req_id = req_id,
-                    .node = msg.data[2],
+                adam_job_t job = {
+                    .req.id = req_id,
+                    .req.node = msg.data[2],
                     .reset = false,
                 };
 
-                // docs/07-firmware.md:43 - dedup before everything else but the
-                // payload length, so a QoS 1 retry is never taken for a new job
-                if (job.req_id != 0x0000 && dedup_contains(job.req_id, job.node)) {
-                    publish_ack(job.req_id, ADAM_ACK_DUPLICATE);
+                // 07:43 - dedup before everything but the payload length, so a
+                // QoS 1 retry is never taken for a new job
+                if (job.req.id != 0x0000 && dedup_contains(job.req.id, job.req.node)) {
+                    publish_ack(job.req.id, ADAM_ACK_DUPLICATE);
                     continue;
                 }
 
-                // docs/07-firmware.md:44 - status ERROR or graph not ready yet
-                // (boot, or fetch failed) is NOT_READY, not BUSY
+                // 07:44 - ERROR or graph not ready (boot/fetch failed) -> NOT_READY
                 if (executor_status() == ADAM_STATUS_ERROR || !graph_ready()) {
-                    publish_ack(job.req_id, ADAM_ACK_NOT_READY);
+                    publish_ack(job.req.id, ADAM_ACK_NOT_READY);
                     continue;
                 }
 
-                if (job.node < 'A' || job.node > 'Z') {
+                if (job.req.node < 'A' || job.req.node > 'Z') {
                     ack_status = ADAM_ACK_INVALID_TARGET;
                     goto publish;
                 }
-                // docs/07-firmware.md:46 - not IDLE, or the 1-slot mailbox
-                // still holds the previous job: BUSY lets the gateway requeue
-                // the request instead of failing it. Only this task writes to
-                // the mailbox, so a later xQueueSend failure really is the
-                // internal safety net (docs/06-protocol.md:375).
+                // 07:46 - not IDLE or mailbox still holds a job -> BUSY, so the
+                // gateway can requeue; a later send failure is QUEUE_FULL (06:375)
                 if (executor_status() != ADAM_STATUS_IDLE || uxQueueMessagesWaiting(s_job_queue) > 0) {
                     ack_status = ADAM_ACK_BUSY;
                     goto publish;
@@ -292,17 +293,17 @@ static void event_validation_task(void* pvParameters) {
                 }
             publish:
                 if (ack_status == ADAM_ACK_ACCEPTED) {
-                    dedup_remember(job.req_id, job.node);
+                    dedup_remember(job.req.id, job.req.node);
                 }
-                publish_ack(job.req_id, ack_status);
+                publish_ack(job.req.id, ack_status);
 
             } else if (cmp_topic(&msg, MQTT_RESET_TOPIC)) {
-                // Spec 6.2: admin reset, payload node ('A' default). Flush the
-                // remaining commands so the recovery route stays clean.
+                // 6.2 - admin reset: payload is ignored, target is always Home.
+                // Flush the remaining commands so the recovery route stays clean.
                 mqtt_flush_jobs();
-                mqtt_job_t job = {
-                    .req_id = msg.data_len >= 2 ? parse_req_id(msg.data) : 0,
-                    .node = msg.data_len >= 3 ? msg.data[2] : 'A',
+                adam_job_t job = {
+                    .req.id = 0,
+                    .req.node = 0,
                     .reset = true,
                 };
                 xQueueSend(s_job_queue, &job, (TickType_t)0);
@@ -334,6 +335,14 @@ esp_err_t mqtt_app_start(void) {
             {
                 .keepalive = 30,
                 .disable_clean_session = true,
+                .last_will =
+                    {
+                        .topic = MQTT_ONLINE_TOPIC,
+                        .msg = "\x00",
+                        .msg_len = 1,
+                        .qos = 1,
+                        .retain = true,
+                    },
             },
         .task =
             {
@@ -346,7 +355,7 @@ esp_err_t mqtt_app_start(void) {
         return ESP_ERR_NO_MEM;
     }
 
-    s_job_queue = xQueueCreate(1, sizeof(mqtt_job_t));
+    s_job_queue = xQueueCreate(1, sizeof(adam_job_t));
     if (s_job_queue == NULL) {
         return ESP_ERR_NO_MEM;
     }
@@ -367,6 +376,8 @@ esp_err_t mqtt_app_start(void) {
         return ESP_ERR_NO_MEM;
     }
 
+    ESP_RETURN_ON_ERROR(esp_register_shutdown_handler(publish_offline), TAG, "Failed to register shutdown handler");
+
     return ESP_OK;
 }
 
@@ -377,7 +388,26 @@ void mqtt_publish(const char* topic, const char* data, int len, int qos, int ret
     esp_mqtt_client_publish(s_client, topic, data, len, qos, retain);
 }
 
-bool mqtt_get_job_blocked(mqtt_job_t* job) {
+void mqtt_publish_u8(const char* topic, uint8_t data, int qos, int retain) {
+    if (s_client == NULL) {
+        return;
+    }
+    esp_mqtt_client_publish(s_client, topic, (const char*)&data, 1, qos, retain);
+}
+
+// Single writer for adam/srv/graph_version: [version:4] LE, retained, 0 = not ready
+void mqtt_publish_graph_version(uint32_t version) {
+    uint8_t payload[4] = {
+        (uint8_t)(version & 0xff),
+        (uint8_t)((version >> 8) & 0xff),
+        (uint8_t)((version >> 16) & 0xff),
+        (uint8_t)((version >> 24) & 0xff),
+    };
+    mqtt_publish(MQTT_GRAPH_VERSION_TOPIC, (const char*)payload, 4, 1, true);
+    ESP_LOGI(TAG, "graph_version published: %" PRIu32, version);
+}
+
+bool mqtt_get_job_blocked(adam_job_t* job) {
     return xQueueReceive(s_job_queue, job, portMAX_DELAY) == pdTRUE;
 }
 

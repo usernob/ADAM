@@ -110,6 +110,7 @@ void dwell_run(void) {
     ESP_LOGI(TAG, "Dwell timer expired, closing the lid (servo %d deg)", DWELL_SERVO_CLOSE_DEG);
     servo_write_deg(DWELL_SERVO_CLOSE_DEG);
 
-    // Dwell finished notification
+    // Dwell finished notification. The caller (Task Executor) republishes the
+    // trash capacity right after this returns, once the lid is closed again.
     sensors_buzzer_beep(120);
 }

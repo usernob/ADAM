@@ -7,8 +7,6 @@
 #    define GRAPH_SERVER_URL "https://adam-three-sand.vercel.app/graph.bin"
 #endif
 
-esp_err_t init_graph_fetch(void);
-
-void graph_fetch_notify(void);
+esp_err_t graph_fetch_init(void);
 
 #endif // SRC_GRAPH_FETCH_H

@@ -2,16 +2,16 @@
 #define SRC_EXECUTOR_H
 
 #include "esp_err.h"
-#include "mqtt.h"
+#include "protocol.h"
 
-esp_err_t init_executor(void);
+esp_err_t executor_init(void);
 
 // Current robot status (published wire code, docs/06-protocol.md)
 adam_status_t executor_status(void);
 
-/* Enter the ERROR state (LINE_LOST / NODE_TIMEOUT / NO_PATH):
- * publish adam/srv/error (1 byte code) + status ERROR, halt the motor,
- * flush every queue; the robot waits for an admin reset (spec 7.2). */
-void executor_set_error(adam_error_t reason);
+// Enter ERROR (LINE_LOST / NODE_TIMEOUT / NO_PATH): publish [req_id:2][code:1]
+// + current_pos + status, halt the motor, flush every queue (spec 7.2/7.3).
+// req_id = the job that failed, 0 for an error without a request.
+void executor_set_error(uint16_t req_id, adam_error_t reason);
 
 #endif // SRC_EXECUTOR_H

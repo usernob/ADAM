@@ -5,10 +5,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
 #include "freertos/projdefs.h"
-#include "freertos/queue.h"
 #include "freertos/task.h"
 #include "graph.h"
-#include "portmacro.h"
+#include "mqtt.h"
 #include "sdkconfig.h"
 #include "wifi.h"
 #include <stdint.h>
@@ -21,11 +20,8 @@
 
 static const char* TAG = "graph_fetch";
 
-// Spec 7.1: Task Fetch, low priority (1), core 0
-static QueueHandle_t s_trigger;
-
-/* Graph metadata from the X-Graph-* response headers, captured by the event
- * handler because IDF 5.x has no esp_http_client_get_response_header yet */
+// X-Graph-* response headers, captured in the event handler: IDF 5.x has no
+// esp_http_client_get_response_header yet
 static struct {
     int version;
     int nodes;
@@ -40,13 +36,6 @@ static esp_err_t fetch_event_handler(esp_http_client_event_t* evt) {
         }
     }
     return ESP_OK;
-}
-
-void graph_fetch_notify(void) {
-    if (s_trigger != NULL) {
-        uint8_t flag = 1;
-        xQueueOverwrite(s_trigger, &flag);
-    }
 }
 
 static void fetch_and_apply(void) {
@@ -91,8 +80,9 @@ static void fetch_and_apply(void) {
     int64_t len = esp_http_client_get_content_length(client);
     int status = esp_http_client_get_status_code(client);
 
-    if (status != 200 || n <= 0 || len != (int64_t)(n * n)) {
-        ESP_LOGE(TAG, "invalid response: status=%d n=%d len=%lld", status, n, (long long)len);
+    // framing (07:31): HTTP 200, X-Graph-Version not 0, body n*n
+    if (status != 200 || version <= 0 || n <= 0 || len != (int64_t)(n * n)) {
+        ESP_LOGE(TAG, "invalid response: status=%d n=%d v=%d len=%lld", status, n, version, (long long)len);
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
         return;
@@ -123,7 +113,7 @@ static void fetch_and_apply(void) {
         return;
     }
 
-    err = graph_update(buf, (size_t)n);
+    err = graph_update(buf, (size_t)n, (uint32_t)version);
     free(buf);
 
     if (err != ESP_OK) {
@@ -131,31 +121,23 @@ static void fetch_and_apply(void) {
         return;
     }
 
+    // real version out once the matrix is installed; a failed fetch keeps 0
+    // (07:39,67)
+    mqtt_publish_graph_version(graph_version());
+
     ESP_LOGI(TAG, "graph v%d installed: %d nodes, %lld bytes", version, n, (long long)len);
 }
 
+// Spec 7.1: Task Fetch, low priority (1), core 0. Downloaded once at boot and
+// never refreshed at runtime (07:31) - so the task fetches, installs and exits.
 static void graph_fetch_task(void* pvParameters) {
     // Do not touch the socket before WiFi has an IP, this transport state can
     // spin the CPU without a long yield until the task watchdog fires
     wifi_wait_connected();
     fetch_and_apply(); // initial download at boot
-
-    for (;;) {
-        uint8_t flag;
-        if (xQueueReceive(s_trigger, &flag, portMAX_DELAY) != pdTRUE) {
-            continue;
-        }
-        wifi_wait_connected();
-        fetch_and_apply();
-    }
 }
 
-esp_err_t init_graph_fetch(void) {
-    s_trigger = xQueueCreate(1, sizeof(uint8_t));
-    if (s_trigger == NULL) {
-        return ESP_ERR_NO_MEM;
-    }
-
+esp_err_t graph_fetch_init(void) {
     // 8192: esp_http_client + the TLS handshake need about that much
     if (xTaskCreatePinnedToCore(graph_fetch_task, "Task Fetch", 8192, NULL, 1, NULL, 0) != pdPASS) {
         return ESP_ERR_NO_MEM;

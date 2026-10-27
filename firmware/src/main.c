@@ -46,15 +46,15 @@ void app_main() {
     ESP_ERROR_CHECK(dwell_init());
 
     // Boot on Node 'A' facing north, status IDLE (spec 3.1)
-    ESP_ERROR_CHECK_WITHOUT_ABORT(init_wifi_sta());
+    ESP_ERROR_CHECK_WITHOUT_ABORT(wifi_init_sta());
 
     ESP_ERROR_CHECK(mqtt_app_start());
 
     // The graph is downloaded from the server (GET /graph, https) - Task Fetch
-    ESP_ERROR_CHECK(init_graph_fetch());
+    ESP_ERROR_CHECK(graph_fetch_init());
 
-    ESP_ERROR_CHECK(init_path_resolver());
-    ESP_ERROR_CHECK(init_executor());
+    ESP_ERROR_CHECK(path_resolver_init());
+    ESP_ERROR_CHECK(executor_init());
 }
 
 #else

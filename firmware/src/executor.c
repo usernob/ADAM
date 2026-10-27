@@ -11,6 +11,7 @@
 #include "motor.h"
 #include "mqtt.h"
 #include "path_resolver.h"
+#include "protocol.h"
 #include "sensors.h"
 #include <stdbool.h>
 #include <stddef.h>
@@ -18,11 +19,8 @@
 
 static const char* TAG = "executor";
 
-/* Robot status wire codes (adam_status_t, docs/06-protocol.md):
- * IDLE/MOVING/DWELL/ERROR are published. OBSTACLE is reserved and no longer
- * emitted now that the BFD-1000 Near brake has been removed.
- * s_state below is the *scheduler* state (what the task loop does),
- * s_status is the published wire status. */
+// s_state = what the task loop is doing, s_status = published wire code
+// (adam_status_t). OBSTACLE is reserved and no longer emitted.
 typedef enum {
     STATE_IDLE,
     STATE_MOVING,
@@ -94,13 +92,20 @@ static void publish_status(adam_status_t status) {
     mqtt_publish(MQTT_STATUS_TOPIC, (const char*)&wire, 1, 1, true);
 }
 
-static void publish_pos(size_t node) {
-    char c = (char)(node + 'A');
-    mqtt_publish(MQTT_CURRENT_POS_TOPIC, &c, 1, 1, true);
-    ESP_LOGI(TAG, "Position published: node %c", c);
+// current_pos = [current][next], 2 byte retain; next = 0 when heading nowhere
+static void publish_current_pos(size_t current, size_t next) {
+    uint8_t payload[2] = {(uint8_t)(current + 'A'), (uint8_t)(next ? next + 'A' : 0)};
+    mqtt_publish(MQTT_CURRENT_POS_TOPIC, (const char*)payload, 2, 1, true);
+    ESP_LOGI(TAG, "Position published: %c -> %c", payload[0], payload[1] ? payload[1] : '-');
 }
 
-void executor_set_error(adam_error_t reason) {
+// trash right after the lid closes (07:107, 04:14); at boot via MQTT connect
+static void publish_trash(void) {
+    uint8_t trash = sensors_trash_level_percent();
+    mqtt_publish(MQTT_TRASH_TOPIC, (const char*)&trash, 1, 1, true);
+}
+
+void executor_set_error(uint16_t req_id, adam_error_t reason) {
     if (s_state == STATE_ERROR) {
         return;
     }
@@ -111,16 +116,22 @@ void executor_set_error(adam_error_t reason) {
     path_resolver_flush_paths();
     mqtt_flush_jobs();
 
-    uint8_t code = (uint8_t)reason;
-    mqtt_publish(MQTT_ERROR_TOPIC, (const char*)&code, 1, 1, false);
+    // [req_id:2 LE][code:1]; the id comes from the caller so it can never be
+    // stale (06:348), 0 for an error that belongs to no request (07:76)
+    adam_req_t data = {
+        .id = req_id,
+        .code = reason,
+    };
+    mqtt_publish(MQTT_ERROR_TOPIC, (const char*)&data, 3, 1, false);
+    // current_pos = [current][0] before status = ERROR (07:76)
+    publish_current_pos(path_resolver_current(), 0);
     publish_status(ADAM_STATUS_ERROR);
     s_status = ADAM_STATUS_ERROR;
     ESP_LOGE(TAG, "ERROR: %s, robot stopped and waits for an admin reset (spec 7.2)", err_name(reason));
 }
 
-/* Start a new step: turn the robot to the edge direction (spec 3.2),
- * reset the deadline and send the MOVING status.
- * Fails when the edge is not valid in the graph. */
+// Turn onto the edge direction and reset the deadline (spec 3.2). Returns false
+// when the edge is not valid in the current graph.
 static bool move_begin_step(void) {
     size_t from = s_nav.path[s_step - 1];
     size_t to = s_nav.path[s_step];
@@ -137,6 +148,9 @@ static bool move_begin_step(void) {
     }
 
     motor_turn_to_heading(EDGE_DIR(edge));
+
+    // current_pos = [from][to] at every edge start (07:58)
+    publish_current_pos(from, to);
 
     s_step_deadline = now_ms() + STEP_TIMEOUT_MS;
     s_no_line_since = -1;
@@ -186,7 +200,7 @@ static void moving_tick(void) {
             s_no_line_since = now_ms();
         } else if (now_ms() - s_no_line_since > LINE_LOST_MS) {
             ESP_LOGE(TAG, "Line lost (5 sensors blank > %d ms)", LINE_LOST_MS);
-            executor_set_error(ADAM_ERR_LINE_LOST);
+            executor_set_error(s_nav.job.req.id, ADAM_ERR_LINE_LOST);
             return;
         }
     } else {
@@ -228,7 +242,7 @@ static void moving_tick(void) {
         // Step timeout: the node was not reached
         if (now_ms() > s_step_deadline) {
             ESP_LOGE(TAG, "Step %d/%d not finished within %d ms", (int)s_step, (int)s_nav.len - 1, STEP_TIMEOUT_MS);
-            executor_set_error(ADAM_ERR_NODE_TIMEOUT);
+            executor_set_error(s_nav.job.req.id, ADAM_ERR_NODE_TIMEOUT);
             return;
         }
         return; // not there yet, keep running the PID
@@ -242,9 +256,11 @@ static void moving_tick(void) {
     s_junction_run = 0;
     s_junction_valid = false;
     s_wait_clear = true;
-    publish_pos(to);
     path_resolver_set_current(to);
     s_step++;
+
+    // current_pos = [node][next], next = 0 at the target (07:59)
+    publish_current_pos(to, s_step < s_nav.len ? s_nav.path[s_step] : 0);
 
     // Home (Node A): face north again (spec 3.1 and 7.2)
     if (to == 0) {
@@ -255,22 +271,25 @@ static void moving_tick(void) {
         // Path finished
         s_junction_run = 0;
 
-        if (!s_nav.recovery) {
+        if (!s_nav.job.reset) {
             // Dwell on the target node (spec 4) after a normal ride
+            publish_current_pos(path_resolver_current(), 0);
             publish_status(ADAM_STATUS_DWELL);
             s_status = ADAM_STATUS_DWELL;
             dwell_run();
+            publish_trash();
         }
         s_status = ADAM_STATUS_IDLE;
         publish_status(ADAM_STATUS_IDLE);
+        publish_current_pos(path_resolver_current(), 0);
         s_state = STATE_IDLE;
-        ESP_LOGI(TAG, "%s navigation finished, back to IDLE", s_nav.recovery ? "Recovery" : "Normal");
+        ESP_LOGI(TAG, "%s navigation finished, back to IDLE", s_nav.job.reset ? "Recovery" : "Normal");
         return;
     }
 
     // Continue with the next edge
     if (!move_begin_step()) {
-        executor_set_error(ADAM_ERR_NO_PATH);
+        executor_set_error(s_nav.job.req.id, ADAM_ERR_NO_PATH);
         return;
     }
 }
@@ -278,7 +297,7 @@ static void moving_tick(void) {
 // One IDLE iteration: take a path from the Route Finder and start navigating
 static void idle_tick(void) {
     nav_path_t nav;
-    if (!get_nav(&nav)) {
+    if (!path_resolver_get_nav(&nav)) {
         vTaskDelay(pdMS_TO_TICKS(50));
         return;
     }
@@ -294,11 +313,14 @@ static void idle_tick(void) {
 
     if (s_nav.len == 1) {
         // Target = current position: dwell right away (spec 4), without moving
+        publish_current_pos(s_nav.path[0], 0);
         publish_status(ADAM_STATUS_DWELL);
         s_status = ADAM_STATUS_DWELL;
         dwell_run();
+        publish_trash();
         s_status = ADAM_STATUS_IDLE;
         publish_status(ADAM_STATUS_IDLE);
+        publish_current_pos(s_nav.path[0], 0);
         ESP_LOGI(TAG, "Already on the target node, dwell finished");
         return;
     }
@@ -306,7 +328,7 @@ static void idle_tick(void) {
     s_status = ADAM_STATUS_MOVING;
     publish_status(ADAM_STATUS_MOVING);
     if (!move_begin_step()) {
-        executor_set_error(ADAM_ERR_NO_PATH);
+        executor_set_error(nav.job.req.id, ADAM_ERR_NO_PATH);
     }
 }
 
@@ -332,8 +354,8 @@ static void executor(void* pvParameters) {
             motor_halt();
             {
                 nav_path_t nav;
-                bool got = get_nav(&nav);
-                if (got && nav.recovery && nav.len >= 1) {
+                bool got = path_resolver_get_nav(&nav);
+                if (got && nav.job.reset && nav.len >= 1) {
                     ESP_LOGW(TAG, "Recovery: admin reset route accepted (%d nodes)", (int)nav.len);
                     s_nav = nav;
                     s_wait_clear = true;
@@ -342,6 +364,7 @@ static void executor(void* pvParameters) {
                         motor_turn_to_heading(DIR_NORTH);
                         s_status = ADAM_STATUS_IDLE;
                         publish_status(ADAM_STATUS_IDLE);
+                        publish_current_pos(path_resolver_current(), 0);
                         s_state = STATE_IDLE;
                         ESP_LOGI(TAG, "Recovery finished (already on Home)");
                         break;
@@ -352,7 +375,7 @@ static void executor(void* pvParameters) {
                     s_status = ADAM_STATUS_MOVING;
                     publish_status(ADAM_STATUS_MOVING);
                     if (!move_begin_step()) {
-                        executor_set_error(ADAM_ERR_NO_PATH);
+                        executor_set_error(nav.job.req.id, ADAM_ERR_NO_PATH);
                     }
                 } else if (got) {
                     ESP_LOGW(TAG, "Non recovery path ignored while in ERROR");
@@ -368,7 +391,7 @@ static void executor(void* pvParameters) {
     }
 }
 
-esp_err_t init_executor(void) {
+esp_err_t executor_init(void) {
     if (xTaskCreatePinnedToCore(executor, "Task Executor", 4096, NULL, 3, NULL, 1) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }

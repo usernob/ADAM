@@ -64,7 +64,7 @@ static void event_handler(void* arg, esp_event_base_t event_base, int32_t event_
     }
 }
 
-esp_err_t init_wifi_sta() {
+esp_err_t wifi_init_sta() {
     ESP_LOGI(TAG, "Starting WiFi in STA mode...");
     s_wifi_event_group = xEventGroupCreate();
 

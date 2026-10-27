@@ -31,11 +31,18 @@ extern const char* STR_DIR[4];
 extern const uint8_t dummy_graph[DUMMY_GRAPH_COUNT][DUMMY_GRAPH_COUNT];
 // clang-format on
 
-// Install a new graph matrix (weight + direction), copies `count x count`
-// bytes from `data` into RAM. No-op failures leave the current graph intact.
-esp_err_t graph_update(const uint8_t* data, size_t count);
+// Install a matrix + the gateway version it came from (count x count bytes).
+// Version 0 = "graph not ready"; failures leave graph and version untouched.
+esp_err_t graph_update(const uint8_t* data, size_t count, uint32_t version);
 
 // Get the active graph matrix (weight + direction), false if no graph set yet
 bool graph_get(const uint8_t** edges, size_t* count);
+
+// Installed matrix version, 0 = no ready graph yet (adam/srv/graph_version)
+uint32_t graph_version(void);
+
+// Matrix installed under version != 0: gate for accepting jobs (07:44) and for
+// the gateway to dispatch
+bool graph_ready(void);
 
 #endif // SRC_GRAPH_H

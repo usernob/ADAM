@@ -7,7 +7,7 @@
 #define WIFI_SSID "Wokwi-GUEST"
 #define WIFI_PASS ""
 
-esp_err_t init_wifi_sta();
+esp_err_t wifi_init_sta();
 
 /* Wait until the STA has an IP (WIFI_CONNECTED_BIT). Safe to call again
  * while already connected, it returns right away. */

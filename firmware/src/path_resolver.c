@@ -11,6 +11,7 @@
 #include "graph.h"
 #include "mqtt.h"
 #include "portmacro.h"
+#include "protocol.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -190,19 +191,19 @@ static inline size_t chartoi(char c) {
 }
 
 // Wrap the Dijkstra result into a nav_path_t and queue it for the Task Executor
-static void enqueue_nav(size_t* order, int n, bool recovery, const char* target) {
+static void enqueue_nav(size_t* order, int n, const adam_job_t* job, const char* target) {
     nav_path_t nav = {
         .len = (size_t)n,
-        .recovery = recovery,
     };
     memcpy(nav.path, order, (size_t)n * sizeof(size_t));
+    memcpy(&nav.job, job, sizeof(adam_job_t));
 
     s_ws.route[0] = '\0';
     int off = 0;
     for (int i = 0; i < n && off < (int)s_ws.route_len - 5; i++) {
         off += snprintf(s_ws.route + off, s_ws.route_len - off, i ? " -> %c" : "%c", itochar(order[i]));
     }
-    ESP_LOGI(TAG, "Path '%s': %s (recovery=%d)", target, s_ws.route, recovery);
+    ESP_LOGI(TAG, "Path '%s': %s (recovery=%d)", target, s_ws.route, nav.job.reset);
 
     // Queue full means queue flooding, drop the oldest item
     if (xQueueSend(s_path_queue, &nav, (TickType_t)0) != pdTRUE) {
@@ -223,7 +224,7 @@ static void path_resolver(void* pvParameters) {
         }
 
         // Wait for a command from the server (move or admin reset)
-        mqtt_job_t job;
+        adam_job_t job;
         if (!mqtt_get_job_blocked(&job)) {
             continue;
         }
@@ -235,9 +236,9 @@ static void path_resolver(void* pvParameters) {
             dest_node = 0;
             ESP_LOGW(TAG, "Admin RESET command: recovery route %c -> %c", itochar(s_current_node), itochar(dest_node));
         } else {
-            size_t target = chartoi(job.node);
+            size_t target = chartoi(job.req.node);
             if (target >= count) {
-                ESP_LOGW(TAG, "Target node '%c' is outside the graph (%d nodes)", job.node, (int)count);
+                ESP_LOGW(TAG, "Target node '%c' is outside the graph (%d nodes)", job.req.node, (int)count);
                 continue;
             }
             dest_node = target;
@@ -245,7 +246,7 @@ static void path_resolver(void* pvParameters) {
                 // Already on the target: queue a 1-node path, the Task Executor
                 // runs the dwell on that node right away (spec 4)
                 size_t order[1] = {dest_node};
-                enqueue_nav(order, 1, false, "dwell in place");
+                enqueue_nav(order, 1, &job, "dwell in place");
                 continue;
             }
         }
@@ -255,7 +256,7 @@ static void path_resolver(void* pvParameters) {
         if (!dijkstra(count, edges, s_current_node, dest_node, s_ws.dist, s_ws.prev, s_ws.visited)) {
             // Spec 6.2: no route available, report the error and wait
             ESP_LOGE(TAG, "No route from %c to %c", itochar(s_current_node), itochar(dest_node));
-            executor_set_error(ADAM_ERR_NO_PATH);
+            executor_set_error(job.req.id, ADAM_ERR_NO_PATH);
             continue;
         }
 
@@ -264,15 +265,15 @@ static void path_resolver(void* pvParameters) {
             s_ws.order[i] = (size_t)-1;
         }
 
-        char label[2] = {job.reset ? 'R' : job.node, '\0'};
-        enqueue_nav(s_ws.order, n, job.reset, label);
+        char label[2] = {job.reset ? 'R' : job.req.node, '\0'};
+        enqueue_nav(s_ws.order, n, &job, label);
 
         vTaskDelay(100 / portTICK_PERIOD_MS);
     }
 }
 
-esp_err_t init_path_resolver(void) {
-    s_path_queue = xQueueCreate(10, sizeof(nav_path_t));
+esp_err_t path_resolver_init(void) {
+    s_path_queue = xQueueCreate(1, sizeof(nav_path_t));
     if (s_path_queue == NULL) {
         return ESP_ERR_NO_MEM;
     }
@@ -284,7 +285,7 @@ esp_err_t init_path_resolver(void) {
     return ESP_OK;
 }
 
-bool get_nav(nav_path_t* out) {
+bool path_resolver_get_nav(nav_path_t* out) {
     if (s_path_queue == NULL) {
         return false;
     }

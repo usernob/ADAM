@@ -14,9 +14,10 @@ const char* STR_DIR[4] = {"north", "east", "south", "west"};
 static uint8_t* s_matrix;
 static uint8_t* s_matrix_retired;
 static size_t s_count;
+static uint32_t s_version; // 0 = graph not ready, see graph_version()
 static portMUX_TYPE s_matrix_lock = portMUX_INITIALIZER_UNLOCKED;
 
-esp_err_t graph_update(const uint8_t* data, size_t count) {
+esp_err_t graph_update(const uint8_t* data, size_t count, uint32_t version) {
     if (data == NULL || count == 0 || (count - 1) > (DIST_INF / MAX_EDGE_WEIGHT)) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -32,6 +33,7 @@ esp_err_t graph_update(const uint8_t* data, size_t count) {
     s_matrix_retired = s_matrix;
     s_matrix = copy;
     s_count = count;
+    s_version = version;
     portEXIT_CRITICAL(&s_matrix_lock);
 
     free(expired);
@@ -50,6 +52,19 @@ bool graph_get(const uint8_t** edges, size_t* count) {
     *edges = matrix;
     *count = nodes;
     return true;
+}
+
+uint32_t graph_version(void) {
+    portENTER_CRITICAL(&s_matrix_lock);
+    uint32_t version = s_version;
+    portEXIT_CRITICAL(&s_matrix_lock);
+    return version;
+}
+
+bool graph_ready(void) {
+    const uint8_t* edges;
+    size_t count;
+    return graph_version() != 0 && graph_get(&edges, &count);
 }
 
 // Weighted undirected graph, anti-symmetric direction (spec 2.1):
