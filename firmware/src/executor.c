@@ -92,6 +92,33 @@ static void publish_status(adam_status_t status) {
     mqtt_publish(MQTT_STATUS_TOPIC, (const char*)&wire, 1, 1, true);
 }
 
+// Task Fetch reports here when all 3 boot attempts failed (06:317, 07:38).
+// Flag only: the executor task itself decides and publishes the boot status.
+static volatile bool s_fetch_failed = false;
+
+void executor_set_fetch_failed(void) {
+    s_fetch_failed = true;
+}
+
+// Boot status (07:38-39): nothing is published until Task Fetch settled -
+// ERROR when every attempt failed, IDLE only once the graph is installed.
+// Returns true when the boot decision is made and the task loop may run.
+static bool boot_status_settle(void) {
+    if (s_fetch_failed) {
+        // No error topic: there is no request behind a failed boot fetch, and
+        // graph_version stays 0 (06:317). The robot takes no job until reboot.
+        s_status = ADAM_STATUS_ERROR;
+        publish_status(ADAM_STATUS_ERROR);
+        ESP_LOGE(TAG, "Fetch failed after all retries, boot status = ERROR (07:38)");
+        return true;
+    }
+    if (!graph_ready()) {
+        return false;
+    }
+    publish_status(ADAM_STATUS_IDLE);
+    return true;
+}
+
 // current_pos = [current][next], 2 byte retain; next = 0 when heading nowhere
 static void publish_current_pos(size_t current, size_t next) {
     uint8_t payload[2] = {(uint8_t)(current + 'A'), (uint8_t)(next ? next + 'A' : 0)};
@@ -137,12 +164,11 @@ static bool move_begin_step(void) {
     size_t to = s_nav.path[s_step];
 
     const uint8_t* edges;
-    size_t count;
-    if (!graph_get(&edges, &count) || from >= count || to >= count) {
+    if (!graph_get(&edges)) {
         return false;
     }
 
-    uint8_t edge = edges[(from * count) + to];
+    uint8_t edge = edges[(from * GRAPH_NODE_COUNT_MAX) + to];
     if (EDGE_WEIGHT(edge) == NO_EDGE) {
         return false;
     }
@@ -335,7 +361,11 @@ static void idle_tick(void) {
 static void executor(void* pvParameters) {
     ESP_LOGI(TAG, "Task Executor ON: PID 100 Hz (Kp=%d, Kd=%d), core 1, prio 3", (int)PID_KP, (int)PID_KD);
 
-    publish_status(ADAM_STATUS_IDLE);
+    // No status before Task Fetch settled (07:38-39): IDLE only with a real
+    // graph, ERROR when all 3 attempts failed
+    while (!boot_status_settle()) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
 
     for (;;) {
         switch (s_state) {

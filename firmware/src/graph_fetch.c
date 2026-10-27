@@ -2,12 +2,14 @@
 #include "esp_err.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
+#include "executor.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
 #include "freertos/projdefs.h"
 #include "freertos/task.h"
 #include "graph.h"
 #include "mqtt.h"
+#include "portmacro.h"
 #include "sdkconfig.h"
 #include "wifi.h"
 #include <stdint.h>
@@ -18,33 +20,28 @@
 #    include "esp_crt_bundle.h"
 #endif
 
+#define FETCH_RETRY_COUNT 3
+#define FETCH_RETRY_DELAY_MS 2000 // 07:31 - jeda 2 s antar percobaan
+
 static const char* TAG = "graph_fetch";
 
-// X-Graph-* response headers, captured in the event handler: IDF 5.x has no
-// esp_http_client_get_response_header yet
-static struct {
-    int version;
-    int nodes;
-} s_meta;
+static int s_version;
 
 static esp_err_t fetch_event_handler(esp_http_client_event_t* evt) {
     if (evt->event_id == HTTP_EVENT_ON_HEADER) {
-        if (strcasecmp(evt->header_key, "X-Graph-Nodes") == 0) {
-            s_meta.nodes = atoi(evt->header_value);
-        } else if (strcasecmp(evt->header_key, "X-Graph-Version") == 0) {
-            s_meta.version = atoi(evt->header_value);
+        if (strcasecmp(evt->header_key, "X-Graph-Version") == 0) {
+            s_version = atoi(evt->header_value);
         }
     }
     return ESP_OK;
 }
 
-static void fetch_and_apply(void) {
+static esp_err_t fetch_and_apply(void) {
     esp_http_client_config_t config = {
         .url = GRAPH_SERVER_URL,
         .timeout_ms = 5000,
         .event_handler = fetch_event_handler,
 #if CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
-        // Public CA (e.g. Let's Encrypt), for a self signed cert use .cert_pem instead
         .crt_bundle_attach = esp_crt_bundle_attach,
 #endif
     };
@@ -52,50 +49,52 @@ static void fetch_and_apply(void) {
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (client == NULL) {
         ESP_LOGE(TAG, "client init failed");
-        return;
+        return ESP_ERR_INVALID_STATE;
     }
 
-    esp_http_client_set_method(client, HTTP_METHOD_GET);
+    esp_err_t err;
 
-    s_meta.version = -1;
-    s_meta.nodes = 0;
+    s_version = -1;
+
+    // ESP_RETURN_ON_ERROR would skip esp_http_client_cleanup and leak the client
+    err = esp_http_client_set_method(client, HTTP_METHOD_GET);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "set method GET failed: %s", esp_err_to_name(err));
+        esp_http_client_cleanup(client);
+        return err;
+    }
 
     ESP_LOGI(TAG, "fetch: open %s", GRAPH_SERVER_URL);
-    esp_err_t err = esp_http_client_open(client, 0);
+    err = esp_http_client_open(client, 0);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "open failed: %s", esp_err_to_name(err));
         esp_http_client_cleanup(client);
-        return;
+        return err;
     }
 
     if (esp_http_client_fetch_headers(client) < 0) {
         ESP_LOGE(TAG, "fetch headers failed");
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
-        return;
+        // NB: err still holds ESP_OK from set_method here, returning it
+        // silently told the caller the attempt succeeded
+        return ESP_FAIL;
     }
 
-    int n = s_meta.nodes;
-    int version = s_meta.version;
+    int version = s_version;
     int64_t len = esp_http_client_get_content_length(client);
     int status = esp_http_client_get_status_code(client);
 
     // framing (07:31): HTTP 200, X-Graph-Version not 0, body n*n
-    if (status != 200 || version <= 0 || n <= 0 || len != (int64_t)(n * n)) {
-        ESP_LOGE(TAG, "invalid response: status=%d n=%d v=%d len=%lld", status, n, version, (long long)len);
+    if (status != 200 || version <= 0 || len != (int64_t)(GRAPH_SIZE)) {
+        ESP_LOGE(TAG, "invalid response: status=%d v=%d len=%lld", status, version, (long long)len);
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
-        return;
+        return ESP_ERR_INVALID_RESPONSE;
     }
 
-    ESP_LOGI(TAG, "fetch: status=%d n=%d len=%lld", status, n, (long long)len);
-    uint8_t* buf = malloc((size_t)len);
-    if (buf == NULL) {
-        ESP_LOGE(TAG, "no memory for %lld bytes", (long long)len);
-        esp_http_client_close(client);
-        esp_http_client_cleanup(client);
-        return;
-    }
+    ESP_LOGI(TAG, "fetch: status=%d len=%lld", status, (long long)len);
+    uint8_t buf[GRAPH_SIZE];
 
     int total = 0;
     int read_len;
@@ -109,39 +108,58 @@ static void fetch_and_apply(void) {
 
     if (total != (int)len) {
         ESP_LOGE(TAG, "partial read: %d / %lld", total, (long long)len);
-        free(buf);
-        return;
+        return ESP_ERR_HTTP_INCOMPLETE_DATA;
     }
 
-    err = graph_update(buf, (size_t)n, (uint32_t)version);
-    free(buf);
+    err = graph_update(buf, (uint32_t)version);
 
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "graph_update failed: %s", esp_err_to_name(err));
-        return;
+        return err;
     }
 
     // real version out once the matrix is installed; a failed fetch keeps 0
     // (07:39,67)
     mqtt_publish_graph_version(graph_version());
 
-    ESP_LOGI(TAG, "graph v%d installed: %d nodes, %lld bytes", version, n, (long long)len);
+    ESP_LOGI(TAG, "graph v%d installed: %lld bytes", version, (long long)len);
+    return ESP_OK;
 }
 
-// Spec 7.1: Task Fetch, low priority (1), core 0. Downloaded once at boot and
-// never refreshed at runtime (07:31) - so the task fetches, installs and exits.
+// Spec 07 §7.1: Task Fetch, low priority (1), core 0. Runs once at boot and
+// then deletes itself, so no idle task is left behind.
 static void graph_fetch_task(void* pvParameters) {
     // Do not touch the socket before WiFi has an IP, this transport state can
     // spin the CPU without a long yield until the task watchdog fires
     wifi_wait_connected();
-    fetch_and_apply(); // initial download at boot
+
+    bool installed = false;
+    for (int attempt = 1; attempt <= FETCH_RETRY_COUNT; attempt++) {
+        if (fetch_and_apply() == ESP_OK) {
+            installed = true;
+            break;
+        }
+        ESP_LOGW(TAG, "attempt %d/%d failed", attempt, FETCH_RETRY_COUNT);
+        if (attempt < FETCH_RETRY_COUNT) {
+            vTaskDelay((TickType_t)pdMS_TO_TICKS(FETCH_RETRY_DELAY_MS));
+        }
+    }
+
+    if (!installed) {
+        // 06:317 / 07:38: graph_version stays 0, no retry until reboot, and
+        // the boot status becomes ERROR instead of IDLE
+        executor_set_fetch_failed();
+    }
+
+    // One-shot: fetch settled (success or out of retries), release the stack
+    vTaskDelete(NULL);
 }
 
 esp_err_t graph_fetch_init(void) {
-    // 8192: esp_http_client + the TLS handshake need about that much
+    // 8192: esp_http_client + the TLS handshake need about that much - far
+    // more than CONFIG_ESP_MAIN_TASK_STACK_SIZE (3584), hence the task
     if (xTaskCreatePinnedToCore(graph_fetch_task, "Task Fetch", 8192, NULL, 1, NULL, 0) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
-
     return ESP_OK;
 }

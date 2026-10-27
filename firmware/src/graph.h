@@ -25,18 +25,19 @@ typedef uint16_t dist_t;
 
 extern const char* STR_DIR[4];
 
+// Because the alphabet only has 26 character
+#define GRAPH_NODE_COUNT_MAX 26
+#define GRAPH_SIZE (GRAPH_NODE_COUNT_MAX * GRAPH_NODE_COUNT_MAX)
+
 // clang-format off
 // dummy graph
-#define DUMMY_GRAPH_COUNT 19
-extern const uint8_t dummy_graph[DUMMY_GRAPH_COUNT][DUMMY_GRAPH_COUNT];
+extern const uint8_t dummy_graph[26][26];
 // clang-format on
 
-// Install a matrix + the gateway version it came from (count x count bytes).
-// Version 0 = "graph not ready"; failures leave graph and version untouched.
-esp_err_t graph_update(const uint8_t* data, size_t count, uint32_t version);
+esp_err_t graph_update(const uint8_t* data, uint32_t version);
 
 // Get the active graph matrix (weight + direction), false if no graph set yet
-bool graph_get(const uint8_t** edges, size_t* count);
+bool graph_get(const uint8_t** edges);
 
 // Installed matrix version, 0 = no ready graph yet (adam/srv/graph_version)
 uint32_t graph_version(void);

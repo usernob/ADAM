@@ -1,70 +1,43 @@
 #include "graph.h"
 #include "esp_err.h"
-#include "portmacro.h"
 #include <stdint.h>
-#include <stdlib.h>
 #include <string.h>
 
 const char* STR_DIR[4] = {"north", "east", "south", "west"};
 
-// Active graph owner: single RAM copy of the matrix, swapped atomically.
-// Double-buffered for reader safety: the retired matrix is only freed on the
-// next update, so a reader holding the previous pointer has one refresh cycle
-// of grace before the memory goes away.
-static uint8_t* s_matrix;
-static uint8_t* s_matrix_retired;
-static size_t s_count;
+static uint8_t s_matrix[GRAPH_SIZE];
 static uint32_t s_version; // 0 = graph not ready, see graph_version()
-static portMUX_TYPE s_matrix_lock = portMUX_INITIALIZER_UNLOCKED;
 
-esp_err_t graph_update(const uint8_t* data, size_t count, uint32_t version) {
-    if (data == NULL || count == 0 || (count - 1) > (DIST_INF / MAX_EDGE_WEIGHT)) {
+esp_err_t graph_update(const uint8_t* data, uint32_t version) {
+    if (data == NULL || version == 0) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    uint8_t* copy = malloc(count * count);
-    if (copy == NULL) {
-        return ESP_ERR_NO_MEM;
-    }
-    memcpy(copy, data, count * count);
-
-    portENTER_CRITICAL(&s_matrix_lock);
-    uint8_t* expired = s_matrix_retired;
-    s_matrix_retired = s_matrix;
-    s_matrix = copy;
-    s_count = count;
+    memcpy(s_matrix, data, GRAPH_SIZE);
     s_version = version;
-    portEXIT_CRITICAL(&s_matrix_lock);
 
-    free(expired);
     return ESP_OK;
 }
 
-bool graph_get(const uint8_t** edges, size_t* count) {
-    portENTER_CRITICAL(&s_matrix_lock);
-    const uint8_t* matrix = s_matrix;
-    size_t nodes = s_count;
-    portEXIT_CRITICAL(&s_matrix_lock);
-
-    if (matrix == NULL) {
+bool graph_get(const uint8_t** edges) {
+    // s_matrix is a static array, so "installed" is tracked by s_version:
+    // 0 means no graph_update() succeeded yet (boot, or every fetch failed).
+    // Callers rely on this gate (path_resolver waits for a real matrix).
+    if (s_version == 0) {
         return false;
     }
-    *edges = matrix;
-    *count = nodes;
+    *edges = s_matrix;
     return true;
 }
 
 uint32_t graph_version(void) {
-    portENTER_CRITICAL(&s_matrix_lock);
     uint32_t version = s_version;
-    portEXIT_CRITICAL(&s_matrix_lock);
     return version;
 }
 
 bool graph_ready(void) {
     const uint8_t* edges;
-    size_t count;
-    return graph_version() != 0 && graph_get(&edges, &count);
+    return graph_version() != 0 && graph_get(&edges);
 }
 
 // Weighted undirected graph, anti-symmetric direction (spec 2.1):
@@ -81,7 +54,7 @@ bool graph_ready(void) {
 // direction is always unambiguous for the robot (spec 2).
 // Notes: no C-G, F-J, K-O lanes (holes); S is a dead end; K is a hub.
 // clang-format off
-const uint8_t dummy_graph[DUMMY_GRAPH_COUNT][DUMMY_GRAPH_COUNT] = {
+const uint8_t dummy_graph[GRAPH_NODE_COUNT_MAX][GRAPH_NODE_COUNT_MAX] = {
 // A                              B                              C                              D                              E                              F                              G                              H                              I                              J                              K                              L                              M                              N                              O                              P                              Q                              R                              S
     { 0, EDGE_ENCODE(3, DIR_EAST), 0, 0, EDGE_ENCODE(9, DIR_SOUTH), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, // A
     { EDGE_ENCODE(3, DIR_WEST), 0, EDGE_ENCODE(30, DIR_EAST), 0, 0, EDGE_ENCODE(1, DIR_SOUTH), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, // B

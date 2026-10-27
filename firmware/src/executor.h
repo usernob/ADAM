@@ -14,4 +14,8 @@ adam_status_t executor_status(void);
 // req_id = the job that failed, 0 for an error without a request.
 void executor_set_error(uint16_t req_id, adam_error_t reason);
 
+// Task Fetch exhausted all 3 boot attempts (06:317, 07:38): the executor boot
+// then publishes status = ERROR instead of IDLE; graph_version stays 0.
+void executor_set_fetch_failed(void);
+
 #endif // SRC_EXECUTOR_H
