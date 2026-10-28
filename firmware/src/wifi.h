@@ -2,6 +2,8 @@
 #define SRC_WIFI_H
 
 #include "esp_err.h"
+#include <stdbool.h>
+#include <stdint.h>
 
 // WiFi parameters
 #define WIFI_SSID "Wokwi-GUEST"
@@ -9,8 +11,7 @@
 
 esp_err_t wifi_init_sta();
 
-/* Wait until the STA has an IP (WIFI_CONNECTED_BIT). Safe to call again
- * while already connected, it returns right away. */
-void wifi_wait_connected(void);
+/* Wait up to timeout_ms for the STA to obtain an IP. */
+bool wifi_wait_connected(uint32_t timeout_ms);
 
 #endif // SRC_WIFI_H

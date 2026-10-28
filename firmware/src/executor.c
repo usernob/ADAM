@@ -6,11 +6,14 @@
 #include "esp_timer.h"
 #include "freertos/idf_additions.h"
 #include "freertos/projdefs.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "graph.h"
+#include "graph_fetch.h"
 #include "motor.h"
 #include "mqtt.h"
 #include "path_resolver.h"
+#include "portmacro.h"
 #include "protocol.h"
 #include "sensors.h"
 #include <stdbool.h>
@@ -28,7 +31,19 @@ typedef enum {
 } exec_state_t;
 
 static volatile exec_state_t s_state = STATE_IDLE;
-static volatile adam_status_t s_status = ADAM_STATUS_IDLE;
+static bool s_boot_settled = false;
+typedef struct {
+    adam_status_t status;
+    uint8_t current_pos[2];
+} executor_telemetry_t;
+static portMUX_TYPE s_telemetry_mux = portMUX_INITIALIZER_UNLOCKED;
+static SemaphoreHandle_t s_telemetry_publish_mutex;
+static executor_telemetry_t s_telemetry = {
+    .status = ADAM_STATUS_IDLE,
+    .current_pos = {'A', 0},
+};
+static int s_published_status = -1;
+static void publish_state(size_t current, size_t next, adam_status_t status, bool boot_settled);
 
 // PID line follower constants (base speed 160, Kp 45, Kd 18)
 #define PID_BASE_SPEED 160
@@ -78,52 +93,81 @@ static const char* err_name(adam_error_t err) {
 }
 
 adam_status_t executor_status(void) {
-    return s_status;
+    portENTER_CRITICAL(&s_telemetry_mux);
+    adam_status_t status = s_telemetry.status;
+    portEXIT_CRITICAL(&s_telemetry_mux);
+    return status;
 }
 
-// Publish the status, but only when it actually changed
-static void publish_status(adam_status_t status) {
-    static int s_published = -1;
-    if (s_published == (int)status) {
-        return;
+bool executor_replay_telemetry(void) {
+    if (s_telemetry_publish_mutex == NULL) {
+        return false;
     }
-    s_published = (int)status;
-    uint8_t wire = (uint8_t)status;
-    mqtt_publish(MQTT_STATUS_TOPIC, (const char*)&wire, 1, 1, true);
-}
 
-// Task Fetch reports here when all 3 boot attempts failed (06:317, 07:38).
-// Flag only: the executor task itself decides and publishes the boot status.
-static volatile bool s_fetch_failed = false;
+    xSemaphoreTake(s_telemetry_publish_mutex, portMAX_DELAY);
+    portENTER_CRITICAL(&s_telemetry_mux);
+    if (!s_boot_settled) {
+        portEXIT_CRITICAL(&s_telemetry_mux);
+        xSemaphoreGive(s_telemetry_publish_mutex);
+        return false;
+    }
+    executor_telemetry_t snapshot = s_telemetry;
+    portEXIT_CRITICAL(&s_telemetry_mux);
 
-void executor_set_fetch_failed(void) {
-    s_fetch_failed = true;
+    mqtt_publish(MQTT_CURRENT_POS_TOPIC, (const char*)snapshot.current_pos, sizeof(snapshot.current_pos), 1, true);
+    mqtt_publish_u8(MQTT_STATUS_TOPIC, (uint8_t)snapshot.status, 1, true);
+    xSemaphoreGive(s_telemetry_publish_mutex);
+    return true;
 }
 
 // Boot status (07:38-39): nothing is published until Task Fetch settled -
 // ERROR when every attempt failed, IDLE only once the graph is installed.
 // Returns true when the boot decision is made and the task loop may run.
 static bool boot_status_settle(void) {
-    if (s_fetch_failed) {
+    // Query graph_fetch's own state instead of having it push state to us.
+    // graph_fetch owns the "fetch failed" state, so we pull it from there.
+    if (graph_fetch_has_failed()) {
         // No error topic: there is no request behind a failed boot fetch, and
         // graph_version stays 0 (06:317). The robot takes no job until reboot.
-        s_status = ADAM_STATUS_ERROR;
-        publish_status(ADAM_STATUS_ERROR);
+        publish_state(path_resolver_current(), 0, ADAM_STATUS_ERROR, true);
         ESP_LOGE(TAG, "Fetch failed after all retries, boot status = ERROR (07:38)");
         return true;
     }
     if (!graph_ready()) {
         return false;
     }
-    publish_status(ADAM_STATUS_IDLE);
+    publish_state(path_resolver_current(), 0, ADAM_STATUS_IDLE, true);
     return true;
 }
 
 // current_pos = [current][next], 2 byte retain; next = 0 when heading nowhere
-static void publish_current_pos(size_t current, size_t next) {
-    uint8_t payload[2] = {(uint8_t)(current + 'A'), (uint8_t)(next ? next + 'A' : 0)};
-    mqtt_publish(MQTT_CURRENT_POS_TOPIC, (const char*)payload, 2, 1, true);
-    ESP_LOGI(TAG, "Position published: %c -> %c", payload[0], payload[1] ? payload[1] : '-');
+// The mutex serializes state updates with MQTT replay through both publish calls;
+// the critical section protects the small shared snapshot itself.
+static void publish_state(size_t current, size_t next, adam_status_t status, bool boot_settled) {
+    uint8_t pos[2] = {(uint8_t)(current + 'A'), (uint8_t)(next ? next + 'A' : 0)};
+    bool status_changed;
+
+    xSemaphoreTake(s_telemetry_publish_mutex, portMAX_DELAY);
+    portENTER_CRITICAL(&s_telemetry_mux);
+    status_changed = s_published_status != (int)status;
+    s_telemetry.status = status;
+    s_telemetry.current_pos[0] = pos[0];
+    s_telemetry.current_pos[1] = pos[1];
+    if (boot_settled) {
+        s_boot_settled = true;
+    }
+    if (status_changed) {
+        s_published_status = (int)status;
+    }
+    portEXIT_CRITICAL(&s_telemetry_mux);
+
+    mqtt_publish(MQTT_CURRENT_POS_TOPIC, (const char*)pos, sizeof(pos), 1, true);
+    if (status_changed) {
+        uint8_t wire = (uint8_t)status;
+        mqtt_publish(MQTT_STATUS_TOPIC, (const char*)&wire, 1, 1, true);
+    }
+    ESP_LOGI(TAG, "State published: %c -> %c, status=%d", pos[0], pos[1] ? pos[1] : '-', (int)status);
+    xSemaphoreGive(s_telemetry_publish_mutex);
 }
 
 // trash right after the lid closes (07:107, 04:14); at boot via MQTT connect
@@ -150,10 +194,8 @@ void executor_set_error(uint16_t req_id, adam_error_t reason) {
         .code = reason,
     };
     mqtt_publish(MQTT_ERROR_TOPIC, (const char*)&data, 3, 1, false);
-    // current_pos = [current][0] before status = ERROR (07:76)
-    publish_current_pos(path_resolver_current(), 0);
-    publish_status(ADAM_STATUS_ERROR);
-    s_status = ADAM_STATUS_ERROR;
+    // Update current_pos and status in one snapshot transaction (07:76).
+    publish_state(path_resolver_current(), 0, ADAM_STATUS_ERROR, false);
     ESP_LOGE(TAG, "ERROR: %s, robot stopped and waits for an admin reset (spec 7.2)", err_name(reason));
 }
 
@@ -174,9 +216,10 @@ static bool move_begin_step(void) {
     }
 
     motor_turn_to_heading(EDGE_DIR(edge));
+    s_state = STATE_MOVING;
 
-    // current_pos = [from][to] at every edge start (07:58)
-    publish_current_pos(from, to);
+    // Edge start enters MOVING; update status and current_pos atomically (07:58).
+    publish_state(from, to, ADAM_STATUS_MOVING, false);
 
     s_step_deadline = now_ms() + STEP_TIMEOUT_MS;
     s_no_line_since = -1;
@@ -285,35 +328,35 @@ static void moving_tick(void) {
     path_resolver_set_current(to);
     s_step++;
 
-    // current_pos = [node][next], next = 0 at the target (07:59)
-    publish_current_pos(to, s_step < s_nav.len ? s_nav.path[s_step] : 0);
-
     // Home (Node A): face north again (spec 3.1 and 7.2)
     if (to == 0) {
         motor_turn_to_heading(DIR_NORTH);
     }
 
     if (s_step >= s_nav.len) {
-        // Path finished
+        // Path finished; publish the destination with its settled status directly.
         s_junction_run = 0;
 
         if (!s_nav.job.reset) {
-            // Dwell on the target node (spec 4) after a normal ride
-            publish_current_pos(path_resolver_current(), 0);
-            publish_status(ADAM_STATUS_DWELL);
-            s_status = ADAM_STATUS_DWELL;
+            // Dwell on the target node (spec 4) after a normal ride.
+            publish_state(to, 0, ADAM_STATUS_DWELL, false);
             dwell_run();
             publish_trash();
+            publish_state(to, 0, ADAM_STATUS_IDLE, false);
+        } else {
+            // Admin recovery skips dwell and settles directly to IDLE.
+            publish_state(to, 0, ADAM_STATUS_IDLE, false);
         }
-        s_status = ADAM_STATUS_IDLE;
-        publish_status(ADAM_STATUS_IDLE);
-        publish_current_pos(path_resolver_current(), 0);
         s_state = STATE_IDLE;
         ESP_LOGI(TAG, "%s navigation finished, back to IDLE", s_nav.job.reset ? "Recovery" : "Normal");
         return;
     }
 
-    // Continue with the next edge
+    // Intermediate arrival remains MOVING while pointing to the next node.
+    publish_state(to, s_nav.path[s_step], ADAM_STATUS_MOVING, false);
+
+    // Start the next edge; move_begin_step publishes its [from][to] snapshot.
+    // A failed edge lookup transitions to ERROR directly.
     if (!move_begin_step()) {
         executor_set_error(s_nav.job.req.id, ADAM_ERR_NO_PATH);
         return;
@@ -339,20 +382,14 @@ static void idle_tick(void) {
 
     if (s_nav.len == 1) {
         // Target = current position: dwell right away (spec 4), without moving
-        publish_current_pos(s_nav.path[0], 0);
-        publish_status(ADAM_STATUS_DWELL);
-        s_status = ADAM_STATUS_DWELL;
+        publish_state(s_nav.path[0], 0, ADAM_STATUS_DWELL, false);
         dwell_run();
         publish_trash();
-        s_status = ADAM_STATUS_IDLE;
-        publish_status(ADAM_STATUS_IDLE);
-        publish_current_pos(s_nav.path[0], 0);
+        publish_state(s_nav.path[0], 0, ADAM_STATUS_IDLE, false);
         ESP_LOGI(TAG, "Already on the target node, dwell finished");
         return;
     }
 
-    s_status = ADAM_STATUS_MOVING;
-    publish_status(ADAM_STATUS_MOVING);
     if (!move_begin_step()) {
         executor_set_error(nav.job.req.id, ADAM_ERR_NO_PATH);
     }
@@ -392,18 +429,13 @@ static void executor(void* pvParameters) {
 
                     if (nav.len == 1) { // Reset while already on Home: only fix the heading
                         motor_turn_to_heading(DIR_NORTH);
-                        s_status = ADAM_STATUS_IDLE;
-                        publish_status(ADAM_STATUS_IDLE);
-                        publish_current_pos(path_resolver_current(), 0);
+                        publish_state(path_resolver_current(), 0, ADAM_STATUS_IDLE, false);
                         s_state = STATE_IDLE;
                         ESP_LOGI(TAG, "Recovery finished (already on Home)");
                         break;
                     }
 
                     s_step = 1;
-                    s_state = STATE_MOVING;
-                    s_status = ADAM_STATUS_MOVING;
-                    publish_status(ADAM_STATUS_MOVING);
                     if (!move_begin_step()) {
                         executor_set_error(nav.job.req.id, ADAM_ERR_NO_PATH);
                     }
@@ -422,6 +454,10 @@ static void executor(void* pvParameters) {
 }
 
 esp_err_t executor_init(void) {
+    s_telemetry_publish_mutex = xSemaphoreCreateMutex();
+    if (s_telemetry_publish_mutex == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
     if (xTaskCreatePinnedToCore(executor, "Task Executor", 4096, NULL, 3, NULL, 1) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }

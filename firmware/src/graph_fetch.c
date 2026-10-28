@@ -2,7 +2,6 @@
 #include "esp_err.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
-#include "executor.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
 #include "freertos/projdefs.h"
@@ -22,10 +21,19 @@
 
 #define FETCH_RETRY_COUNT 3
 #define FETCH_RETRY_DELAY_MS 2000 // 07:31 - jeda 2 s antar percobaan
+#define FETCH_WIFI_WAIT_MS 30000  // batas tunggu IP sebelum boot fetch dinyatakan gagal
 
 static const char* TAG = "graph_fetch";
 
 static int s_version;
+
+// Fetch failure state: set when all retries exhausted or WiFi timeout.
+// The executor polls this to decide boot status (ERROR vs IDLE).
+static volatile bool s_fetch_failed = false;
+
+bool graph_fetch_has_failed(void) {
+    return s_fetch_failed;
+}
 
 static esp_err_t fetch_event_handler(esp_http_client_event_t* evt) {
     if (evt->event_id == HTTP_EVENT_ON_HEADER) {
@@ -129,9 +137,14 @@ static esp_err_t fetch_and_apply(void) {
 // Spec 07 §7.1: Task Fetch, low priority (1), core 0. Runs once at boot and
 // then deletes itself, so no idle task is left behind.
 static void graph_fetch_task(void* pvParameters) {
-    // Do not touch the socket before WiFi has an IP, this transport state can
-    // spin the CPU without a long yield until the task watchdog fires
-    wifi_wait_connected();
+    // Do not touch the socket before WiFi has an IP. Bound this wait so the
+    // executor can settle boot status to ERROR when the AP never connects.
+    if (!wifi_wait_connected(FETCH_WIFI_WAIT_MS)) {
+        ESP_LOGE(TAG, "WiFi did not obtain an IP within %d ms; boot fetch failed", FETCH_WIFI_WAIT_MS);
+        s_fetch_failed = true;
+        vTaskDelete(NULL);
+        return;
+    }
 
     bool installed = false;
     for (int attempt = 1; attempt <= FETCH_RETRY_COUNT; attempt++) {
@@ -148,7 +161,7 @@ static void graph_fetch_task(void* pvParameters) {
     if (!installed) {
         // 06:317 / 07:38: graph_version stays 0, no retry until reboot, and
         // the boot status becomes ERROR instead of IDLE
-        executor_set_fetch_failed();
+        s_fetch_failed = true;
     }
 
     // One-shot: fetch settled (success or out of retries), release the stack

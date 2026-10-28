@@ -156,16 +156,17 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_
         mqtt_publish_graph_version(graph_version());
         mqtt_publish_u8(MQTT_ONLINE_TOPIC, 0x01, 1, true);
 
-        // battery, trash and pos have no other trigger than connect (07:39,111)
+        // Re-send the current retained status and [current][next] on every
+        // connection, including the active edge during MOVING (07:72, 7.4).
+        for (int attempt = 0; attempt < 3 && !executor_replay_telemetry(); attempt++) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+
+        // battery and trash have no other trigger than connect (07:39,111)
         uint8_t battery = sensors_battery_percent();
         uint8_t trash = sensors_trash_level_percent();
         mqtt_publish(MQTT_BATTERY_TOPIC, (const char*)&battery, 1, 1, true);
         mqtt_publish(MQTT_TRASH_TOPIC, (const char*)&trash, 1, 1, true);
-        // while MOVING the retained [current][next] of the running edge is right
-        if (executor_status() != ADAM_STATUS_MOVING) {
-            uint8_t pos[2] = {(uint8_t)('A' + path_resolver_current()), 0};
-            mqtt_publish(MQTT_CURRENT_POS_TOPIC, (const char*)pos, 2, 1, true);
-        }
 
         int msg_id = esp_mqtt_client_subscribe(client, MQTT_MOVE_TOPIC, 1);
         ESP_LOGI(TAG, "sent subscribe moveto, msg_id=%d", msg_id);
@@ -334,7 +335,7 @@ esp_err_t mqtt_app_start(void) {
         .session =
             {
                 .keepalive = 30,
-                .disable_clean_session = true,
+                .disable_clean_session = false,
                 .last_will =
                     {
                         .topic = MQTT_ONLINE_TOPIC,
