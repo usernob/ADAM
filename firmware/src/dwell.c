@@ -92,10 +92,18 @@ void dwell_run(void) {
     sensors_buzzer_beep(80);
 
     int64_t dwell_start = dwell_now_ms();
+    int64_t total_start = dwell_start;
     bool hand_was_present = false;
+    bool capped = false;
 
-    // Dwell loop: 15 second timer, reset while the hand IR sees a hand (spec 4)
+    // Dwell loop: 15 second timer, reset while the hand IR sees a hand (spec 4).
+    // DWELL_TOTAL_MAX_MS caps the entire stop, so a hand that never leaves the
+    // opening cannot hold the node forever (spec 4: robot like an elevator).
     while (dwell_now_ms() - dwell_start < DWELL_TIME_MS) {
+        if (dwell_now_ms() - total_start >= DWELL_TOTAL_MAX_MS) {
+            capped = true;
+            break;
+        }
         bool hand_present = sensors_hand_detected();
 
         if (hand_present) {
@@ -111,7 +119,12 @@ void dwell_run(void) {
         vTaskDelay(pdMS_TO_TICKS(DWELL_SAMPLE_MS));
     }
 
-    ESP_LOGI(TAG, "Dwell timer expired, closing the lid (servo %d deg)", DWELL_SERVO_CLOSE_DEG);
+    if (capped) {
+        ESP_LOGW(TAG, "Dwell total cap (%d ms) reached, closing the lid (servo %d deg)", DWELL_TOTAL_MAX_MS,
+                 DWELL_SERVO_CLOSE_DEG);
+    } else {
+        ESP_LOGI(TAG, "Dwell timer expired, closing the lid (servo %d deg)", DWELL_SERVO_CLOSE_DEG);
+    }
     servo_write_deg(DWELL_SERVO_CLOSE_DEG);
 
     // Dwell finished notification. The caller (Task Executor) republishes the

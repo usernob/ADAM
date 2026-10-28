@@ -5,6 +5,10 @@
 
 // Dwell duration on the target node (spec 4: 15 - 30 seconds)
 #define DWELL_TIME_MS 15000
+/* Hard cap for the whole stop (spec 4): the hand IR may reset the 15 s timer,
+ * but never beyond this total. Keeps one stop short and fair (queue is FIFO)
+ * and makes sure the robot can never be locked inside DWELL forever. */
+#define DWELL_TOTAL_MAX_MS 60000
 // Trash lid servo angles
 #define DWELL_SERVO_OPEN_DEG 90
 #define DWELL_SERVO_CLOSE_DEG 0
