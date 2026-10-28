@@ -179,6 +179,23 @@ static void publish_trash(void) {
     mqtt_publish(MQTT_TRASH_TOPIC, (const char*)&trash, 1, 1, true);
 }
 
+/* Auto-park (07 §7.6): when a stop ends and the bin already reached the full
+ * threshold, raise an internal job back to Home so the robot never blocks a
+ * serving node while the bin is full (the gateway rejects new calls with
+ * TRASH_FULL/bin_full anyway). Skipped on Home itself - emptying the bin is
+ * done there, and a fresh trash value arrives with the next reset/dwell. */
+static void maybe_auto_park(void) {
+    if (path_resolver_current() == 0) {
+        return;
+    }
+    uint8_t trash = sensors_trash_level_percent();
+    if (trash < SENSORS_TRASH_FULL_PERCENT) {
+        return;
+    }
+    ESP_LOGW(TAG, "Trash at %d%%, auto-parking to Home", (int)trash);
+    mqtt_enqueue_internal_home();
+}
+
 /* One dwell on the target node (spec 4): publish DWELL, run the blocking dwell
  * window, then settle back to IDLE. The rollback is conditional because
  * executor_set_error() can be raised from the Route Finder task while
@@ -195,6 +212,7 @@ static void run_dwell(size_t node) {
     }
     s_state = STATE_IDLE;
     publish_state(node, POS_NEXT_NONE, ADAM_STATUS_IDLE);
+    maybe_auto_park();
 }
 
 // [req_id:2 LE][code:1], QoS 1, no retain (06:348). The id comes from the
@@ -426,6 +444,15 @@ static void moving_tick(void) {
         // Path finished; publish the destination with its settled status directly.
         s_junction_run = 0;
 
+        if (s_nav.job.internal) {
+            // Auto-park (07 §7.6): no dwell on the internal ride home, settle
+            // straight back to IDLE at Home.
+            publish_state(to, POS_NEXT_NONE, ADAM_STATUS_IDLE);
+            s_state = STATE_IDLE;
+            ESP_LOGI(TAG, "Auto-park finished, back to IDLE at %c", (int)(to + 'A'));
+            return;
+        }
+
         // Dwell on the target node (spec 4) after a normal ride.
         ESP_LOGI(TAG, "Normal navigation finished, dwell on %c", (int)(to + 'A'));
         run_dwell(to);
@@ -461,6 +488,15 @@ static void idle_tick(void) {
     s_wait_clear = true; // do not detect a node while still on the start node
 
     if (s_nav.len == 1) {
+        if (s_nav.job.internal) {
+            // Auto-park while already on Home (07 §7.6): no dwell, settle
+            // straight back to IDLE.
+            motor_turn_to_heading(DIR_NORTH);
+            publish_state(path_resolver_current(), POS_NEXT_NONE, ADAM_STATUS_IDLE);
+            s_state = STATE_IDLE;
+            ESP_LOGI(TAG, "Auto-park: already on Home, back to IDLE");
+            return;
+        }
         // Target = current position: dwell right away (spec 4), without moving
         ESP_LOGI(TAG, "Already on the target node, dwell right away");
         run_dwell(s_nav.path[0]);

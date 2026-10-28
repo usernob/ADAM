@@ -160,18 +160,25 @@ static void path_resolver(void* pvParameters) {
             continue;
         }
 
-        size_t target = chartoi(job.req.node);
-        if (target >= GRAPH_NODE_COUNT_MAX) {
-            ESP_LOGW(TAG, "Target node '%c' is outside the graph", job.req.node);
-            continue;
-        }
-        size_t dest_node = target;
-        if (dest_node == s_current_node) {
-            // Already on the target: queue a 1-node path, the Task Executor
-            // runs the dwell on that node right away (spec 4)
-            size_t order[1] = {dest_node};
-            enqueue_nav(order, 1, &job, "dwell in place");
-            continue;
+        size_t dest_node;
+        if (job.internal) {
+            // Auto-park (07 §7.6): always Home 'A', no dwell there - the
+            // executor settles straight back to IDLE when the path ends.
+            dest_node = 0;
+        } else {
+            size_t target = chartoi(job.req.node);
+            if (target >= GRAPH_NODE_COUNT_MAX) {
+                ESP_LOGW(TAG, "Target node '%c' is outside the graph", job.req.node);
+                continue;
+            }
+            dest_node = target;
+            if (dest_node == s_current_node) {
+                // Already on the target: queue a 1-node path, the Task Executor
+                // runs the dwell on that node right away (spec 4)
+                size_t order[1] = {dest_node};
+                enqueue_nav(order, 1, &job, "dwell in place");
+                continue;
+            }
         }
 
         ESP_LOGI(TAG, "Calculate route from %c to %c", itochar(s_current_node), itochar(dest_node));
@@ -192,7 +199,7 @@ static void path_resolver(void* pvParameters) {
             order[i] = (size_t)-1;
         }
 
-        char label[2] = {job.req.node, '\0'};
+        char label[2] = {job.internal ? 'P' : job.req.node, '\0'};
         enqueue_nav(order, n, &job, label);
 
         vTaskDelay(100 / portTICK_PERIOD_MS);

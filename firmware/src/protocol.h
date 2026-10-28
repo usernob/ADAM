@@ -49,9 +49,12 @@ typedef struct {
     };
 } adam_req_t;
 
-// One command from the gateway: target node (docs/06-protocol.md)
+// One command from the gateway: target node (docs/06-protocol.md). internal =
+// firmware-generated auto-park to Home when the bin is full (07 §7.6): no
+// ack/req_id is sent for it and the robot skips the dwell at Home.
 typedef struct {
     adam_req_t req;
+    bool internal;
 } adam_job_t;
 
 #endif // SRC_PROTOCOL_H

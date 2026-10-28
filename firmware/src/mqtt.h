@@ -39,10 +39,16 @@ void mqtt_publish_u8(const char* topic, uint8_t data, int qos, int retain);
 // (the value itself is owned by graph.c, graph_version())
 void mqtt_publish_graph_version(uint32_t version);
 
-// Get the next command (move / reset), blocking, called by the Route Finder
+// Get the next command (move), blocking, called by the Route Finder
 bool mqtt_get_job_blocked(adam_job_t* job);
 
 // Flush the command queue (called on error recovery, spec 7.2)
 void mqtt_flush_jobs(void);
+
+/* Raise the firmware's own auto-park job back to Home 'A' when the trash
+ * reaches the full threshold (07 §7.6). Internal job: no ack is sent for it
+ * and the executor skips the dwell at Home (protocol.h adam_job_t.internal).
+ * Callable from any task; dropped while the mailbox is not ready yet. */
+void mqtt_enqueue_internal_home(void);
 
 #endif // SRC_MQTT_H

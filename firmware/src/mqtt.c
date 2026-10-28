@@ -254,6 +254,7 @@ static void event_validation_task(void* pvParameters) {
                 adam_job_t job = {
                     .req.id = req_id,
                     .req.node = msg.data[2],
+                    .internal = false,
                 };
 
                 // 07:43 - dedup before everything but the payload length, so a
@@ -422,5 +423,21 @@ bool mqtt_get_job_blocked(adam_job_t* job) {
 void mqtt_flush_jobs(void) {
     if (s_job_queue != NULL) {
         xQueueReset(s_job_queue);
+    }
+}
+
+void mqtt_enqueue_internal_home(void) {
+    // The mailbox belongs to the gateway's moveto while it holds a job; the
+    // auto-park retry happens on the next IDLE settle, so a drop is harmless.
+    if (s_job_queue == NULL || uxQueueMessagesWaiting(s_job_queue) > 0) {
+        return;
+    }
+    adam_job_t job = {
+        .req.id = 0,
+        .req.node = 'A',
+        .internal = true,
+    };
+    if (xQueueSend(s_job_queue, &job, (TickType_t)0) != pdTRUE) {
+        ESP_LOGW(TAG, "auto-park job dropped: mailbox busy");
     }
 }
