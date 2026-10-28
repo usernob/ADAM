@@ -9,10 +9,12 @@ Saat robot tiba di Node tujuan panggilan:
    * Timer internal (15 detik, `DWELL_TIME_MS`) mulai berjalan.
    * **Sensor IR tangan (FC-51)** dipasang di dekat bukaan tempat sampah, bukan di bawah robot. Output sensor aktif-*low*: `LOW` = tangan/objek terdeteksi.
    * **Aturan Reset Timer**: selama sensor IR tangan mendeteksi tangan, timer dwell di-reset ulang. Setelah tangan menjauh, timer berjalan penuh lagi dari deteksi terakhir, sehingga pengguna tetap punya waktu untuk membuang sampah.
+   * **Batas total**: `DWELL_TOTAL_MAX_MS` (default 5 menit) membatasi total waktu dwell per pemberhentian; walau tangan terus terdeteksi, setelah batas ini tutup tetap ditutup dan tugas selesai. Tanpa batas ini robot bisa terkunci di `DWELL` selamanya.
 3. **Penyelesaian Task**:
    * Jika **timer habis** dan **tidak ada lagi tangan** yang terdeteksi, tempat sampah otomatis menutup.
    * Robot mem-publish `adam/srv/trash` (kapasitas diukur setelah penutup ditutup), `status = IDLE`, dan `current_pos = [node][0]`, lalu **menunggu gateway**.
-   * Gateway yang memiliki antrean akan mengirim job berikutnya setelah menerima `IDLE` dan versi graf robot cocok. Jika antrean kosong, robot tetap `IDLE` sampai ada panggilan baru. Robot tidak mengambil target berikutnya sendiri.
+   * **Auto-park saat penuh**: jika kapasitas ≥ ambang penuh (`SENSORS_TRASH_FULL_PERCENT`, 95%) saat robot kembali `IDLE`, robot langsung bergerak ke Home `A` (lihat [docs/07-firmware.md](07-firmware.md) §7.6) sehingga wadah selalu dapat dikosongkan di Home. Setelah wadah dikosongkan, admin mengirim reset agar telemetri `trash` segar.
+   * Gateway yang memiliki antrean akan mengirim job berikutnya setelah menerima `IDLE` dan versi graf robot cocok. Jika antrean kosong, robot tetap `IDLE` sampai ada panggilan baru. Robot tidak mengambil target berikutnya sendiri — pengecualian tunggalnya adalah auto-park saat sampah penuh.
 
 ## 4.1 Sensor Kapasitas Sampah
 

@@ -68,8 +68,8 @@ Graf adalah **artefak deployment**, bukan state yang diubah saat robot bekerja:
 * Saat versi belum cocok, panggilan baru ditolak `503 graph_update`; tidak ada request yang masuk antrean.
 * Graf aktif di robot tidak boleh berubah saat ada job berjalan atau request `queued`. `POST /save` hanya boleh dilakukan saat tidak ada job aktif dan antrean kosong.
 * Graf baru hanya sah jika cocok dengan marka/lintasan fisik di lantai. Robot harus dimatikan sebelum dipindahkan, lalu dinyalakan di Home `A` menghadap Utara. Perubahan lantai dilakukan saat robot tidak bergerak.
-* Robot mencoba fetch graf maksimal 3 kali saat boot. Jika gagal, `graph_version = 0` dan `status = ERROR`; tidak ada retry otomatis sampai reboot.
-* Admin reset tidak memuat ulang graf. Graf baru berlaku setelah robot reboot.
+* Robot mencoba fetch graf maksimal 3 kali saat boot. Jika gagal, `graph_version = 0` dan `status = ERROR`; tidak ada retry otomatis — reset atau reboot mengulang fetch.
+* Admin reset **memuat ulang** graf (`GET /graph.bin`, lihat [docs/07-firmware.md](07-firmware.md) §7.3.2). Graf baru berlaku setelah robot reboot **atau** reset, dengan prasyarat yang sama: robot di Home `A` menghadap Utara. Tidak ada refresh graf lewat MQTT.
 * Rollback membuat versi baru dari snapshot graf lama; nomor versi tidak pernah diturunkan.
 
 ## 2.3 Deteksi Fisik Persimpangan (Color Marker Sensing)

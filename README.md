@@ -7,10 +7,10 @@
 * **Navigasi otonom**: Dijkstra lokal di ESP32, peta graf berbobot dengan arah mata angin (max 4 edge per node, 1 edge per arah), maksimal 26 node berlabel `A`–`Z` yang unik, dengan `A` wajib ada; label tidak harus berurutan.
 * **Pemanggilan via web**: halaman panggil cepat per node (QR Code di titik fisik), visualisasi peta *real-time*, dan deduplikasi target.
 * **Antrean terpusat**: satu Gateway Node di VPS memegang antrean, mengirim satu job pada satu waktu, dan hanya melanjutkan setelah robot kembali `IDLE` dengan versi graf yang cocok.
-* **Graf boot-only**: graf dimuat sekali saat boot ke buffer tetap 26 × 26 byte; perubahan graf berlaku setelah robot reboot, bukan di tengah job.
+* **Graf boot-only**: graf dimuat saat boot atau admin reset ke buffer tetap 26 × 26 byte; perubahan graf berlaku setelah reboot/reset, bukan di tengah job.
 * **Telemetri MQTT**: posisi `current`/`next`, status, versi graf, baterai, dan kapasitas sampah — wire format biner 1–4 byte per pesan.
 * **Admin-only auth**: user publik tidak perlu akun; hanya admin yang login lewat session. Tidak ada registrasi, OAuth, atau TOTP.
-* **Error & recovery**: deteksi garis hilang/step timeout → motor berhenti, robot menunggu admin reset dan kembali ke Home menghadap Utara.
+* **Error & recovery**: deteksi garis hilang/step timeout → motor berhenti; admin mengangkut robot ke Home lalu mereset — reset = state fresh + unduh ulang graf (satu-satunya pemulihan tanpa mematikan daya).
 * **Interaksi tempat sampah**: sensor IR tangan di dekat bukaan memperpanjang dwell timer; servo membuka/menutup tutup otomatis.
 
 ## Arsitektur Tingkat Tinggi

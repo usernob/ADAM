@@ -298,17 +298,17 @@ systemctl enable --now adam-gateway
 
 ## 10.11 Deployment Graf
 
-Graf hanya diaktifkan saat robot boot. Tidak ada refresh graf saat robot sedang bekerja.
+Graf hanya diaktifkan saat robot boot atau saat admin reset (reset mengunduh ulang `GET /graph.bin`, lihat [docs/07-firmware.md](07-firmware.md) §7.3.2). Tidak ada refresh graf lewat MQTT.
 
 1. Aktifkan maintenance lewat `POST /api/admin/maintenance` dengan `{ "enabled": true }`. Panggilan baru ditolak `503 maintenance` dan dispatch antrean dihentikan.
 2. Tunggu request aktif selesai, lalu kosongkan antrean lewat admin. `POST /save` ditolak `409` selama masih ada request aktif atau antrean.
 3. Simpan graf baru lewat `POST /save` dalam bentuk JSON `{ nodes, edges }`. Gateway memvalidasi, menulis versi baru ke riwayat, menaikkan nomor versi, dan menahan dispatch.
 4. Jika ada perubahan marka/lintasan fisik, lakukan **sekarang**, saat robot berhenti. Software tidak dapat memverifikasi kesesuaian graf dengan lantai.
-5. Pastikan antrean masih kosong dan maintenance tetap aktif. Matikan robot, pindahkan ke Home `A` menghadap Utara, lalu nyalakan kembali.
+5. Pastikan antrean masih kosong dan maintenance tetap aktif. Matikan robot, pindahkan ke Home `A` menghadap Utara, lalu nyalakan kembali. Untuk perubahan murni software tanpa manipulasi fisik, `POST /api/admin/reset` dapat menggantikan power cycle selama robot sudah berada di `A` menghadap Utara.
 6. Robot mengunduh `GET /graph.bin` secara atomic (header versi dan body 676 byte dari snapshot yang sama). Robot memvalidasi HTTP 200, `X-Graph-Version` bukan `0`, dan body 676 byte; maksimal 3 percobaan dengan jeda 2 detik. Setelah berhasil, robot mem-publish `adam/srv/graph_version`.
 7. Gateway membandingkan versi. Setelah versi cocok, heartbeat fresh, dan status `IDLE`, nonaktifkan maintenance. Dispatch baru dilanjutkan.
 
-Jika langkah 6 gagal setelah 3 percobaan, robot mem-publish `graph_version = 0`, `status = ERROR`, dan tidak retry otomatis sampai reboot. Gateway tetap menahan dispatch. Jangan mengirim graf lewat MQTT atau memaksa robot menerima job dengan graf lama.
+Jika langkah 6 gagal setelah 3 percobaan, robot mem-publish `graph_version = 0`, `status = ERROR`, dan tidak retry otomatis; reset atau reboot mengulang langkah 6. Gateway tetap menahan dispatch. Jangan mengirim graf lewat MQTT atau memaksa robot menerima job dengan graf lama.
 
 Rollback:
 

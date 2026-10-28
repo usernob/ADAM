@@ -45,7 +45,7 @@ Antarmuka web melayani pemanggilan dan visualisasi *real-time* melalui **HTTP**,
    * **Publik, tanpa login.** Dibatasi *rate limit* dan deduplikasi target.
    * Menampilkan posisi robot (`current` dan `next`), status, baterai, serta daftar antrean aktif.
    * Jika target sudah ada di antrean atau sedang dituju, tombol tidak menambah antrean baru; UI menampilkan pesan seperti “Rute ke Node A sudah dijadwalkan”.
-   * Jika panggilan ditolak gateway (`maintenance`, `robot_offline`, `graph_update`, `bin_full`), tombol menampilkan pesan tanpa menambah antrean. Untuk `bin_full`, UI menyebut tempat sampah penuh dan menampilkan persentase dari `trash`.
+   * Jika panggilan ditolak gateway (`maintenance`, `robot_offline`, `graph_update`, `bin_full`), tombol menampilkan pesan tanpa menambah antrean. Untuk `bin_full`, UI menyebut tempat sampah penuh, menampilkan persentase dari `trash`, dan menjelaskan pemulihannya: robot menunggu di Home — kosongkan wadah lalu minta admin mereset.
 
 2. **Halaman Visualisasi Graf & Peta (`/map` atau `/viewer`)**:
    * Menampilkan denah graf secara visual dari `GET /api/graph`.
@@ -56,6 +56,7 @@ Antarmuka web melayani pemanggilan dan visualisasi *real-time* melalui **HTTP**,
 3. **Halaman Admin (`/admin`)**:
    * Wajib login admin.
    * Editor graf, status versi graf gateway vs robot, riwayat versi, rollback, mode maintenance, admin reset, manajemen antrean, dan riwayat log.
+   * Tombol admin reset hanya aktif saat robot tidak melayani (`IDLE`/`ERROR`; `409 robot_busy` saat `MOVING`/`DWELL`). Setelah ditekan, UI memantau perubahan retained `status`/`current_pos` dan menampilkan status `resetting` sampai konfirmasi (`status = IDLE` dengan `current_pos = [A][0]`) tiba atau timeout.
    * Editor memuat graf aktif dari `GET /api/graph` dan menyimpan lewat `POST /save` dalam bentuk JSON `{ nodes, edges }`.
    * Menyimpan graf tidak langsung mengubah robot. Gateway menahan dispatch sampai robot reboot dan melaporkan `graph_version` yang sama.
    * Akun admin dibuat lewat CLI di server; tidak ada registrasi publik.
