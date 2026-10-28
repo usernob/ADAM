@@ -29,6 +29,7 @@ Dokumen ini mendefinisikan protokol target: **Gateway Node** memegang antrean, r
 | **`POST /api/admin/graph/rollback`** | POST | Admin | Membuat versi baru dari snapshot graf lama. |
 | **`POST /api/admin/maintenance`** | POST | Admin | Mengaktifkan/menonaktifkan mode maintenance. |
 | **`POST /api/call`** | POST | Publik | Meminta robot menuju satu node. Terkena deduplikasi, rate limit, dan kapasitas antrean. |
+| **`DELETE /api/request/:id`** | DELETE | Publik (dengan `request_id`) | Membatalkan panggilan sendiri selama masih `queued`. |
 | **`GET /cmd/:nodeId`** | GET | Publik | Halaman quick-call untuk QR Code di node fisik. |
 | **`GET /events`** | GET | Publik | Stream SSE untuk snapshot dan pembaruan *real-time*. |
 | **`POST /api/auth/login`** | POST | Publik | Login admin, mengembalikan session cookie. |
@@ -112,6 +113,19 @@ Contoh respons duplikat:
 
 `queue_position` adalah posisi 1-based di antara request `queued`; request aktif (`dispatched`/`serving`) tidak dihitung. Untuk status `in_progress`, `queue_position` tidak diisi (`null`). Untuk `already_here`, `request_id` boleh `null` karena tidak ada request yang dibuat.
 
+### `DELETE /api/request/:id`
+
+Membatalkan panggilan milik pemanggil. Tidak perlu session; endpoint ini dipublikasikan untuk siapa pun yang mengetahui `request_id`-nya (sejalan dengan deduplikasi tanpa auth di `POST /api/call`; `request_id` dikembalikan saat memanggil dan lewat `queue_update`).
+
+| Kondisi | HTTP | `status` | Keterangan |
+| :--- | :---: | :--- | :--- |
+| Request `queued` | `200` | `cancelled` | Berhasil dibatalkan; `queue_update` + `call_result` dikirim. |
+| Request `dispatched`/`serving` | `409` | `not_cancellable` | `moveto` sudah dikirim; robot tidak punya perintah berhenti — gunakan admin reset bila perlu. |
+| Request sudah `done`/`failed`/`cancelled` | `409` | `not_cancellable` | Sudah berstatus final. |
+| `request_id` tidak dikenal | `404` | `not_found` | Tidak ada request dengan ID itu. |
+
+Respons sukses: `{ "request_id": 42, "status": "cancelled" }`. Setelah pembatalan, antrean lanjut dengan request `queued` berikutnya sesuai gate normal.
+
 Deduplikasi “robot sudah di node” berlaku jika robot `IDLE` di node tersebut tanpa request aktif, atau jika robot `DWELL` di sana (yang berarti request `serving` untuk node itu sudah ada), **dan** versi graf robot sudah sama dengan versi graf gateway. Jika robot sedang `MOVING`, `current_pos` hanyalah node terakhir yang dikonfirmasi; robot mungkin sudah meninggalkannya, sehingga panggilan ke node itu tetap boleh masuk antrean.
 
 Jika versi graf robot belum cocok, request baru **ditolak** dengan `503 graph_update` dan tidak masuk antrean. UI menampilkan status maintenance sampai robot reboot dan melaporkan versi yang sama. Request `queued` yang sudah ada sebelum reboot tak terduga tetap tersimpan, tetapi tidak akan didispatch sampai versi cocok kembali. Pada deployment graf, antrean sudah kosong karena `POST /save` mensyaratkan itu.
@@ -193,13 +207,14 @@ Gateway memvalidasi seluruh graf sebelum menyimpan:
 * Graf harus connected dari `A` melalui edge undirected. Untuk graf satu node, `nodes = ["A"]` dan `edges = []` valid.
 * Reverse edge dibuat otomatis: arah berlawanan dan bobot sama. Input tidak boleh memuat kedua arah untuk pasangan yang sama.
 
-`POST /save` ditolak `409` jika masih ada request aktif atau antrean tidak kosong. Admin harus mengaktifkan maintenance, menunggu request aktif selesai, lalu mengosongkan antrean sebelum menyimpan.
+`POST /save` ditolak `409` jika **maintenance nonaktif**, masih ada request aktif, atau antrean tidak kosong. Maintenance aktif adalah prasyarat: admin mengaktifkan maintenance, menunggu request aktif selesai, lalu mengosongkan antrean sebelum menyimpan.
 
 | Kondisi | HTTP | Keterangan |
 | :--- | :---: | :--- |
 | Graf valid dan tersimpan | `200` | Versi baru dibuat; status `pending_reboot`. |
 | Body/graf tidak valid | `400` | `invalid_graph`; tidak ada versi baru. |
 | Bukan admin | `401`/`403` | Session admin tidak ada/tidak valid. |
+| Maintenance nonaktif | `409` | `maintenance`; tidak ada versi baru. |
 | Masih ada request aktif atau antrean | `409` | `active_request` atau `queue_not_empty`; tidak ada versi baru. |
 
 Respons sukses:
@@ -252,9 +267,49 @@ Saat maintenance aktif:
 
 * `POST /api/call` ditolak `503 maintenance`.
 * Dispatch request `queued` dihentikan; request aktif dibiarkan selesai.
-* Admin dapat mengosongkan antrean dan menjalankan `POST /save`.
+* Admin dapat mengosongkan antrean dan menjalankan `POST /save` (maintenance adalah prasyarat `POST /save`).
 * Maintenance dinonaktifkan secara eksplisit setelah robot melaporkan versi graf yang cocok dan kembali `IDLE`.
 * Flag maintenance disimpan di SQLite agar tidak hilang saat gateway restart.
+
+Respons sukses:
+
+```json
+{ "maintenance": true }
+```
+
+### `GET /api/admin/queue`
+
+Mengembalikan seluruh request aktif dan antrean (urutan dispatch):
+
+```json
+{
+  "requests": [
+    { "request_id": 43, "node": "B", "status": "queued", "queue_position": 2, "created_at": "2026-10-28T10:05:00Z" },
+    { "request_id": 42, "node": "C", "status": "serving", "queue_position": null, "created_at": "2026-10-28T10:00:00Z", "dispatched_at": "2026-10-28T10:01:00Z", "req_id": 42 }
+  ]
+}
+```
+
+`queue_position` hanya diisi untuk `queued`; `req_id` adalah nilai wire 16 bit yang dikirim ke robot (berguna melacak `ack`/`error`).
+
+### `POST /api/admin/queue/clear`
+
+Membatalkan seluruh request `queued` (request aktif dibiarkan selesai). Respons: `{ "cancelled": 3 }` — jumlah request yang dibatalkan.
+
+### `GET /api/admin/logs`
+
+Riwayat kejadian sistem dan request, terbaru lebih dulu:
+
+```json
+{
+  "logs": [
+    { "ts": "2026-10-28T10:01:00Z", "level": "info", "event": "request.dispatched", "request_id": 42, "req_id": 42, "message": "moveto terkirim ke robot" },
+    { "ts": "2026-10-28T10:04:30Z", "level": "error", "event": "robot.error", "request_id": 42, "req_id": 42, "code": "LINE_LOST", "message": "robot berhenti di tengah edge" }
+  ]
+}
+```
+
+Setiap entri wajib memuat `ts`, `level`, `event`, dan `message`; `request_id`/`req_id` diisi bila terkait satu panggilan (lihat [docs/10-deployment.md](10-deployment.md) §10.10).
 
 ## 6.3 Siklus Request & Antrean
 
@@ -292,9 +347,26 @@ Aturan penting:
 * **Graph version gate.** Gateway tidak boleh mengirim `moveto` jika `graph_version` robot `0` atau berbeda dari versi graf aktif. Panggilan baru ditolak `503 graph_update`.
 * **Heartbeat gate.** Gateway tidak boleh mengirim `moveto` jika heartbeat `online` terakhir lebih dari 30 detik, atau status retained bukan `IDLE`.
 * **Trash gate.** Gateway tidak boleh mengirim `moveto` jika retained `adam/srv/trash` ≥ 95%; panggilan baru ditolak `503 bin_full` sampai kapasitas turun.
-* **Ack timeout** default 10 detik. Jika `ack` tidak datang, gateway mencocokkan dengan status/posisi retained. Jika tetap tidak jelas, request menjadi `failed` dan dispatch dihentikan sampai robot kembali `IDLE`.
-* **Job lease** default 10 menit. Jika robot offline atau tidak ada heartbeat melewati batas, request aktif menjadi `failed`.
-* **Gateway restart**: request `queued` tetap ada di SQLite. Status retained hanya ditampilkan sebagai last-known; gateway tidak mengirim job baru sampai heartbeat fresh diterima dan status retained `IDLE`.
+* **Ack timeout** default 10 detik. Jika `ack` tidak datang, gateway **merekonsiliasi** request dengan retained telemetry memakai matriks di bawah. Jika hasilnya belum jelas, request tetap `dispatched` sampai **job deadline** habis lalu `failed`.
+* **Job deadline** default **3 menit**, dihitung sejak `moveto` dikirim sampai robot **tiba di target** (masuk `DWELL` atau `IDLE` di target). Lewat batas, request menjadi `failed` dan `call_result` dikirim **walau heartbeat fresh** — robot hidup tapi tersangkut tidak mengunci antrean. Waktu setelah tiba dibatasi terpisah oleh batas dwell total firmware (60 detik, [docs/04-dwell.md](04-dwell.md)), jadi keduanya tidak tumpang tindih.
+* **Job lease** default 10 menit, berlaku untuk kasus **robot offline / heartbeat hilang**: request aktif menjadi `failed` setelah lease. Untuk robot online, job deadline (3 menit) lebih dulu yang menutup request.
+* **Gateway restart**: request `queued` tetap ada di SQLite. Status retained hanya ditampilkan sebagai last-known; gateway tidak mengirim job baru sampai heartbeat fresh diterima dan status retained `IDLE`. Request `dispatched`/`serving` yang kehilangan `ack`/`error` (non-retain, terbit saat gateway down) **direkonsilikan ulang** dari retained telemetry memakai matriks di bawah; timeout ack dihitung setelah restart, bukan di-reset ke nol.
+* **Error lintas status.** Gateway memproses `error` dengan `req_id` apa pun status request saat itu, termasuk masih `dispatched` — `ack` dan `error` dikirim ke topik berbeda, sehingga urutan kedatangannya tidak dijamin (QoS 1 hanya mengurutkan per topik).
+
+### Rekonsiliasi Hasil vs Status Request
+
+Saat **ack timeout**, **gateway reconnect/setelah restart**, dan **evaluasi lease**, gateway menurunkan keputusan request dari retained telemetry robot:
+
+| Retained telemetry robot | Keputusan |
+| :--- | :--- |
+| `status = MOVING` dan `current_pos.next == target` | `serving` — robot sedang menuju target; tunggu. |
+| `status = DWELL` dan `current_pos.current == target` | `serving` — robot tiba dan sedang melayani. |
+| `status = IDLE` dan `current_pos.current == target` | `done` — robot selesai di target (hasil nyata menang, walau status di SQLite masih `failed`/`dispatched`). |
+| `status = IDLE` dan posisi tidak berubah sejak dispatch (robot diam, umumnya di Home `[A][0]`) | `failed` — robot tidak pernah bergerak. |
+| `status = ERROR` | `failed` (ikuti kebijakan robot `ERROR`). |
+| Selain itu (belum jelas) | Tetap `dispatched`; setelah job deadline habis → `failed`. |
+
+`call_result` dikirim pada setiap transisi final (`done`/`failed`/`cancelled`), sehingga UI selalu mencerminkan keputusan rekonsiliasi terakhir.
 
 ### Kesiapan Robot
 
@@ -328,7 +400,7 @@ Karena seluruh request sudah `failed`/`cancelled` ketika robot masuk `ERROR`, ad
 3. Admin menyimpan graf lewat `POST /save`; gateway menaikkan versi dan tetap menahan dispatch karena versi belum cocok.
 4. Admin mengubah marka/lintasan fisik bila perlu, lalu mematikan robot, memindahkannya ke Home `A` menghadap Utara, dan menyalakannya kembali — atau, bila robot sudah berada di `A` menghadap Utara dan perubahannya murni software, mengirim `POST /api/admin/reset` (reset mengunduh graf terbaru tanpa mematikan daya; untuk perubahan marka/lintasan fisik, power cycle tetap disarankan).
 5. Saat boot, robot mengunduh `GET /graph.bin` (maksimal 3 percobaan) dan mem-publish `adam/srv/graph_version`.
-6. Jika fetch gagal, robot mem-publish `graph_version = 0`, `status = ERROR`, dan tidak mencoba lagi otomatis (reset atau reboot mengulang fetch). Jika berhasil, robot mem-publish versi sebenarnya dan `status = IDLE`.
+6. Jika fetch gagal, robot mem-publish `adam/srv/error` `FETCH_FAILED` (`req_id = 0`), `graph_version = 0`, `status = ERROR`, dan tidak mencoba lagi otomatis (reset atau reboot mengulang fetch). Jika berhasil, robot mem-publish versi sebenarnya dan `status = IDLE`.
 7. Gateway membandingkan versi. Setelah versi cocok, heartbeat fresh, dan status `IDLE`, admin menonaktifkan maintenance dan dispatch dilanjutkan.
 
 Rollback memakai prosedur yang sama, tetapi graf baru dibuat dari snapshot riwayat lewat `POST /api/admin/graph/rollback`. Nomor versi tetap naik.
@@ -355,7 +427,7 @@ Tidak ada jalur update graf di tengah job. Jika robot reboot tak terduga ketika 
 * Node memakai ASCII huruf kapital (`'A'`–`'Z'`); satu graf maksimal 26 node.
 * `req_id` adalah **2 byte little-endian**. Nilai `0x0000` dicadangkan untuk pesan global/tanpa request.
 * `req_id` diturunkan dari ID request persisten di SQLite (16 bit rendah). Jika hasilnya `0x0000`, gunakan ID berikutnya. Contoh: `request_id = 42` → wire `2A 00`.
-* Deduplikasi robot memakai pasangan `(req_id, node)`, sehingga pengiriman ulang QoS 1 untuk perintah yang sama tidak dieksekusi dua kali.
+* Deduplikasi robot memakai pasangan `(req_id, node)`, sehingga pengiriman ulang QoS 1 untuk perintah yang sama tidak dieksekusi dua kali. Cache berukuran tetap (buffer ring, 8 entri) dan **hanya menyimpan pasangan yang di-`ack ACCEPTED`** — perintah yang ditolak (`BUSY`, `TRASH_FULL`, dll.) tidak masuk cache sehingga retry setelah kondisi membaik tetap diproses. Cache dibersihkan saat connect dan saat admin reset.
 * Payload perintah maksimum 3 byte; payload telemetri maksimum 4 byte (`graph_version`).
 * Semua kode bersifat append-only; penerima mengabaikan kode yang tidak dikenal.
 
@@ -378,7 +450,7 @@ Kadensi bersifat **event-driven**: `status` dikirim saat berubah; `current_pos` 
 
 `status` retained hanya untuk tampilan last-known. Gateway tetap mewajibkan heartbeat fresh (maksimal 30 detik) sebelum dispatch, dan tidak menganggap retained status sebagai bukti kesiapan.
 
-Saat boot, robot mem-publish `graph_version = 0` **sebelum** `online = 1`, lalu mengunduh graf. Setelah graf siap, robot mem-publish versi sebenarnya. Jika fetch gagal setelah 3 percobaan, robot mem-publish `status = ERROR` dan tetap `graph_version = 0`; tidak ada retry otomatis — reset atau reboot mengulang fetch. Dengan urutan ini gateway tidak pernah melihat state lama yang membuat robot dianggap siap padahal graf belum dimuat.
+Saat boot, robot mem-publish **state netral sebelum** `online = 1`: `graph_version = 0`, `current_pos = [A][0]`, dan `status = IDLE` (retain) — retained sesi sebelumnya (mis. `MOVING` + `[B][C]`) tidak pernah terlihat saat boot. Setelah itu `online = 1`, lalu robot mengunduh graf. Jika fetch sukses, robot mem-publish versi sebenarnya plus `battery`/`trash`. Jika fetch gagal setelah 3 percobaan, robot mem-publish `adam/srv/error` `FETCH_FAILED` (`req_id = 0`) dan `status = ERROR` dan tetap `graph_version = 0`; tidak ada retry otomatis — reset atau reboot mengulang fetch. `graph_version = 0` menahan dispatch selama window boot, sehingga gateway tidak pernah menganggap robot siap padahal graf belum dimuat.
 
 ### Kode `adam/srv/ack`
 
@@ -415,6 +487,9 @@ Saat boot, robot mem-publish `graph_version = 0` **sebelum** `online = 1`, lalu 
 | `0x02` | `LINE_LOST` | Sensor garis kehilangan lintasan melewati batas. |
 | `0x03` | `NODE_TIMEOUT` | Tahap menuju node berikutnya tidak selesai dalam batas waktu. |
 | `0x04` | `INVALID_TARGET` | Target di luar graf atau tidak dapat diproses. |
+| `0x05` | `FETCH_FAILED` | Unduhan `GET /graph.bin` gagal setelah 3 percobaan (saat boot atau reset); `graph_version` tetap `0`. |
+
+`NO_PATH` dan `INVALID_TARGET` adalah kode **defensif** yang praktis tidak terbit pada operasi normal: gateway sudah memvalidasi node terhadap graf sebelum mengirim `moveto` (robot sendiri tidak memvalidasi membership), dan graf selalu connected dari `A`. `NO_PATH` hanya mungkin bila posisi logika robot tidak sinkan dengan lapangan (mis. berhenti di tengah edge lalu di-reset tanpa diangkut). Keduanya tetap dipertahankan sebagai pengaman; penerima wajib mengabaikan kode yang tidak dikenal (append-only).
 
 ### Contoh Byte
 

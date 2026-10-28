@@ -46,6 +46,7 @@ Antarmuka web melayani pemanggilan dan visualisasi *real-time* melalui **HTTP**,
    * Menampilkan posisi robot (`current` dan `next`), status, baterai, serta daftar antrean aktif.
    * Jika target sudah ada di antrean atau sedang dituju, tombol tidak menambah antrean baru; UI menampilkan pesan seperti “Rute ke Node A sudah dijadwalkan”.
    * Jika panggilan ditolak gateway (`maintenance`, `robot_offline`, `graph_update`, `bin_full`), tombol menampilkan pesan tanpa menambah antrean. Untuk `bin_full`, UI menyebut tempat sampah penuh, menampilkan persentase dari `trash`, dan menjelaskan pemulihannya: robot menunggu di Home — kosongkan wadah lalu minta admin mereset.
+   * **Pembatalan sendiri**: selama panggilan masih `queued`, UI menyediakan tombol batal (`DELETE /api/request/:id`, lihat [docs/06-protocol.md](06-protocol.md)) yang memperbarui antrean lewat `queue_update` + `call_result`. Panggilan yang sudah `dispatched`/`serving` tidak bisa dibatalkan user.
 
 2. **Halaman Visualisasi Graf & Peta (`/map` atau `/viewer`)**:
    * Menampilkan denah graf secara visual dari `GET /api/graph`.
@@ -73,7 +74,7 @@ Antarmuka web melayani pemanggilan dan visualisasi *real-time* melalui **HTTP**,
 * Hanya satu request yang boleh *in-flight* pada satu waktu.
 * Dispatch hanya dilakukan jika robot `online` dan heartbeat fresh (maksimal 30 detik), status retained `IDLE`, kapasitas sampah < 95%, tidak ada request aktif, maintenance nonaktif, dan `graph_version` robot sama dengan versi graf aktif.
 * Jika versi graf belum cocok, `POST /api/call` ditolak `503 graph_update`; tidak ada request baru yang masuk antrean. UI menampilkan status maintenance sampai robot reboot.
-* Sebelum menyimpan graf, admin mengaktifkan maintenance lewat `POST /api/admin/maintenance`; ini menghentikan panggilan baru dan dispatch antrean. `POST /save` ditolak `409` selama masih ada request aktif atau antrean.
+* Sebelum menyimpan graf, admin mengaktifkan maintenance lewat `POST /api/admin/maintenance`; ini menghentikan panggilan baru dan dispatch antrean. `POST /save` ditolak `409` selama maintenance nonaktif, masih ada request aktif, atau antrean masih berisi request — maintenance adalah prasyarat save.
 * Request memiliki status: `queued`, `dispatched`, `serving`, `done`, `failed`, `cancelled`.
 * **Kunci deduplikasi adalah target node**, bukan user atau sesi.
   * Selama masih ada request aktif untuk Node A (`queued`, `dispatched`, `serving`), atau robot sedang berada di Node A dalam status `IDLE`/`DWELL` **dengan versi graf yang cocok**, panggilan baru ke Node A tidak menambah antrean.
@@ -97,8 +98,25 @@ Gateway menjadi **MQTT-to-SSE Bridge**. Setiap client yang terhubung menerima sn
 | `battery_update` | `0`–`100` | Persentase baterai |
 | `trash_update` | `0`–`100` | Kapasitas sampah terisi |
 | `queue_update` | daftar request aktif dan menunggu | Termasuk status dan posisi |
-| `call_result` | `{ request_id, status, message }` | Hasil request untuk pemanggil |
+| `call_result` | `{ request_id, status, message }` | Hasil request untuk pemanggil; daftar isi `message` di bawah tabel |
+| `error_update` | `{ req_id, code }` | Alasan error robot (`adam/srv/error`): `NO_PATH`, `LINE_LOST`, `NODE_TIMEOUT`, `FETCH_FAILED`; `req_id = 0` untuk error global |
 | `online_update` | `true`/`false` | Berdasarkan topik LWT `adam/srv/online` |
+
+Isi `call_result.message` didefinisikan per kasus agar UI selalu menampilkan copy yang konsisten:
+
+| Kasus | `status` | `message` (contoh) |
+| :--- | :--- | :--- |
+| Robot selesai dwell di target | `done` | "Robot selesai di Node C." |
+| Dibatalkan user (`DELETE /api/request/:id`) | `cancelled` | "Panggilan dibatalkan." |
+| Dibatalkan admin / dibersihkan | `cancelled` | "Panggilan dibatalkan admin." |
+| Error `NO_PATH` | `failed` | "Tidak ada rute ke node tujuan; admin memeriksa graf dan posisi robot." |
+| Error `LINE_LOST` | `failed` | "Robot kehilangan garis dan berhenti; admin mengangkut robot ke Home lalu mereset." |
+| Error `NODE_TIMEOUT` | `failed` | "Robot gagal mencapai node berikutnya dalam batas waktu; admin memeriksa robot." |
+| Error `FETCH_FAILED` | `failed` | "Robot gagal memuat graf; admin mereset atau me-reboot robot." |
+| Job deadline / lease habis | `failed` | "Robot tidak menyelesaikan panggilan dalam batas waktu." |
+| `QUEUE_FULL`/`INVALID_TARGET` (ack ditolak) | `failed` | "Panggilan tidak dapat diproses robot; coba lagi." |
+
+* `battery_update` dipakai UI untuk menandai **baterai rendah (≤ 20%)**: cukup peringatan tampilan — tidak ada event khusus, tidak ada ambang di firmware, dan tidak ada aksi otomatis robot. Admin memantau persentase untuk menjadwalkan pengisian.
 
 * `status` retained adalah **last known status** untuk tampilan. Gateway baru menganggap robot fresh jika ada heartbeat `online` dalam 30 detik terakhir.
 * Jika `fresh = false`, UI menampilkan indikator `stale`; jangan menampilkan robot sebagai siap menerima job.
@@ -109,7 +127,7 @@ Gateway menjadi **MQTT-to-SSE Bridge**. Setiap client yang terhubung menerima sn
 
 ## 5.5 Autentikasi
 
-* **User publik tidak perlu login.** `/cmd/:nodeId`, `/api/call`, `/api/graph`, `/events`, `/graph.bin`, dan `/map` dapat diakses tanpa akun.
+* **User publik tidak perlu login.** `/cmd/:nodeId`, `POST /api/call`, `DELETE /api/request/:id` (pembatalan panggilan sendiri, selama masih `queued`), `/api/graph`, `/events`, `/graph.bin`, dan `/map` dapat diakses tanpa akun.
 * **Hanya admin** yang memiliki akun.
 * Tidak ada registrasi, OAuth, reset password via email, atau TOTP.
 * Akun admin dibuat dan di-reset lewat CLI di server.

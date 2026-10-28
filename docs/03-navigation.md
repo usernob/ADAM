@@ -9,6 +9,7 @@ Saat robot pertama kali dinyalakan (*power-on / restart*):
 * **Posisi Default**: Node **'A'** (Home Node).
 * **Arah Hadap Default**: **Utara** (`00` / `NORTH`).
 * Status awal robot diatur ke `IDLE`.
+* **Prasyarat operasional (kewajiban admin)**: penempatan di `A` menghadap Utara adalah syarat operasional, bukan fakta firmware — robot **tidak dapat memverifikasi posisi fisiknya**. Menyalakan robot di luar `A` membuat `current_pos = [A][0]` dipublish palsu dan seluruh navigasi bisa salah arah tanpa error apa pun. Bila itu terjadi: matikan robot, pindahkan ke `A` menghadap Utara, lalu nyalakan kembali atau kirim admin reset (lihat [docs/07-firmware.md](07-firmware.md) §7.3.2). Prasyarat yang sama berlaku untuk reset.
 
 ## 3.2 Logika Perubahan Orientasi
 

@@ -283,6 +283,7 @@ systemctl enable --now adam-gateway
 * `allow_anonymous false` dan `acl_file` wajib.
 * `.env` berisi `SESSION_SECRET`, kredensial MQTT, dan konfigurasi sensitif; permission `0600`, owner user service.
 * Rate limit `POST /api/call` (default 1 permintaan/10 detik per IP/`client_id`) dan batas antrean (default 20 `queued`).
+* **Trusted proxy untuk rate limit**: IP asli diambil dari `X-Forwarded-For` pertama yang diteruskan Caddy (yang menerima trafik hanya dari Cloudflare Tunnel di localhost). Header dari sumber lain diabaikan, sehingga IP tidak bisa dipalsukan oleh klien langsung dan seluruh user publik tidak terbaca sebagai satu IP VPS.
 * Validasi ketat input graf di `POST /save`: label `A`–`Z` unik dengan `A` wajib ada, boleh tidak berurutan, maksimal 26 node; bobot `1..63`; tidak ada self-loop/duplicate pair; maksimal satu edge per arah mata angin per node; graf connected dari `A`; reverse edge dibuat otomatis.
 * Jangan mencatat password, token session, atau kredensial MQTT di log.
 * Perbarui Mosquitto, Node, Caddy, dan cloudflared secara berkala.
@@ -300,6 +301,8 @@ systemctl enable --now adam-gateway
 
 Graf hanya diaktifkan saat robot boot atau saat admin reset (reset mengunduh ulang `GET /graph.bin`, lihat [docs/07-firmware.md](07-firmware.md) §7.3.2). Tidak ada refresh graf lewat MQTT.
 
+> **Urutan operasional**: nyalakan **gateway (dan tunnel) sebelum robot**. `GET /graph.bin` menunjuk gateway — jika gateway down saat robot boot, 3 percobaan habis → robot `ERROR` + `FETCH_FAILED` dan harus di-reboot **setelah** gateway hidup; tidak ada retry otomatis.
+
 1. Aktifkan maintenance lewat `POST /api/admin/maintenance` dengan `{ "enabled": true }`. Panggilan baru ditolak `503 maintenance` dan dispatch antrean dihentikan.
 2. Tunggu request aktif selesai, lalu kosongkan antrean lewat admin. `POST /save` ditolak `409` selama masih ada request aktif atau antrean.
 3. Simpan graf baru lewat `POST /save` dalam bentuk JSON `{ nodes, edges }`. Gateway memvalidasi, menulis versi baru ke riwayat, menaikkan nomor versi, dan menahan dispatch.
@@ -308,7 +311,7 @@ Graf hanya diaktifkan saat robot boot atau saat admin reset (reset mengunduh ula
 6. Robot mengunduh `GET /graph.bin` secara atomic (header versi dan body 676 byte dari snapshot yang sama). Robot memvalidasi HTTP 200, `X-Graph-Version` bukan `0`, dan body 676 byte; maksimal 3 percobaan dengan jeda 2 detik. Setelah berhasil, robot mem-publish `adam/srv/graph_version`.
 7. Gateway membandingkan versi. Setelah versi cocok, heartbeat fresh, dan status `IDLE`, nonaktifkan maintenance. Dispatch baru dilanjutkan.
 
-Jika langkah 6 gagal setelah 3 percobaan, robot mem-publish `graph_version = 0`, `status = ERROR`, dan tidak retry otomatis; reset atau reboot mengulang langkah 6. Gateway tetap menahan dispatch. Jangan mengirim graf lewat MQTT atau memaksa robot menerima job dengan graf lama.
+Jika langkah 6 gagal setelah 3 percobaan, robot mem-publish `adam/srv/error` `FETCH_FAILED`, `graph_version = 0`, `status = ERROR`, dan tidak retry otomatis; reset atau reboot mengulang langkah 6. Gateway tetap menahan dispatch. Jangan mengirim graf lewat MQTT atau memaksa robot menerima job dengan graf lama.
 
 Rollback:
 

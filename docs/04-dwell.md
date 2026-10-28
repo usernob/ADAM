@@ -9,7 +9,7 @@ Saat robot tiba di Node tujuan panggilan:
    * Timer internal (15 detik, `DWELL_TIME_MS`) mulai berjalan.
    * **Sensor IR tangan (FC-51)** dipasang di dekat bukaan tempat sampah, bukan di bawah robot. Output sensor aktif-*low*: `LOW` = tangan/objek terdeteksi.
    * **Aturan Reset Timer**: selama sensor IR tangan mendeteksi tangan, timer dwell di-reset ulang. Setelah tangan menjauh, timer berjalan penuh lagi dari deteksi terakhir, sehingga pengguna tetap punya waktu untuk membuang sampah.
-   * **Batas total**: `DWELL_TOTAL_MAX_MS` (default 5 menit) membatasi total waktu dwell per pemberhentian; walau tangan terus terdeteksi, setelah batas ini tutup tetap ditutup dan tugas selesai. Tanpa batas ini robot bisa terkunci di `DWELL` selamanya.
+   * **Batas total**: `DWELL_TOTAL_MAX_MS` (default **60 detik**) membatasi total waktu dwell per pemberhentian; walau tangan terus terdeteksi, setelah batas ini tutup tetap ditutup dan tugas selesai. Robot berperilaku seperti lift — singkat dan adil, karena antrean gateway FIFO: dwell panjang langsung terasa oleh semua pemanggil berikutnya. Tanpa batas ini robot bisa terkunci di `DWELL` selamanya.
 3. **Penyelesaian Task**:
    * Jika **timer habis** dan **tidak ada lagi tangan** yang terdeteksi, tempat sampah otomatis menutup.
    * Robot mem-publish `adam/srv/trash` (kapasitas diukur setelah penutup ditutup), `status = IDLE`, dan `current_pos = [node][0]`, lalu **menunggu gateway**.
@@ -25,3 +25,8 @@ Saat robot tiba di Node tujuan panggilan:
   * `SENSORS_TRASH_FULL_CM` — jarak sensor ke permukaan saat skala mencapai 100% (default `5 cm`). Ini batas skala, bukan ambang penolakan; ambang ada di `SENSORS_TRASH_FULL_PERCENT`.
 * Nilai persentase dikirim sebagai telemetri 1 byte ke topik `adam/srv/trash` (lihat [docs/06-protocol.md](06-protocol.md)).
 * **Ambang penuh**: wadah dianggap penuh pada `SENSORS_TRASH_FULL_PERCENT` (default `95%`), bukan 100%, agar noise ultrasonic di tepi ambang tidak membuat keputusan fluktuatif. Selama penuh, robot mem-publish telemetri seperti biasa tetapi membalas `moveto` dengan `ack TRASH_FULL` sampai kapasitas turun di bawah ambang (mis. setelah wadah dikosongkan). Gateway juga menahan panggilan baru: `POST /api/call` ditolak `503 bin_full` selama retained `adam/srv/trash` ≥ ambang.
+
+## 4.2 Batasan Sensor & Servo
+
+* Pembacaan HC-SR04 **di-clamp ke rentang kalibrasi**: jarak ≤ `SENSORS_TRASH_FULL_CM` dihitung 100%, jarak ≥ `SENSORS_TRASH_EMPTY_CM` dihitung 0%. Nilai di luar rentang tidak menghasilkan `error` apa pun — hanya membatasi persentase yang dipublish.
+* Kegagalan servo/tutup (tidak bisa membuka atau menutup) **bukan** error navigasi dan tidak memicu `adam/srv/error`. Spec saat ini tidak menetapkan deteksi atau retry untuk kegagalan servo — di luar cakupan.

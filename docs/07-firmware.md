@@ -28,19 +28,20 @@ Firmware dijalankan menggunakan Sistem Operasi Real-Time (**FreeRTOS**) pada mik
 | **`Task Executor`** | **High (3)** | Core 1 | PID line follower (100 Hz), sensor garis/warna, kontrol motor, dwell timer dengan sensor IR tangan, update `current_pos`, dan transisi `IDLE`/`DWELL`/`ERROR`. |
 | **`Task Route Finder`** | Medium (2) | Core 0 | Menjalankan Dijkstra **saat job dieksekusi**, bukan saat perintah diterima. Tidak memiliki backlog rute. |
 | **`Task MQTT`** | Medium (2) | Core 0 | Koneksi WSS, QoS 1, **clean session true**, keepalive 30 detik, LWT, validasi `moveto`, `ack`, deduplikasi `(req_id, node)`, dan publish telemetri. |
-| **`Task Fetch`** | Low (1) | Core 0 | Mengambil `GET /graph.bin` **sekali saat boot**, memvalidasi framing (HTTP 200, `X-Graph-Version` bukan `0`, body 676 byte), lalu menyalin ke buffer tetap 26 × 26. Maksimal 3 percobaan dengan jeda 2 detik; jika gagal, `status = ERROR` dan tidak retry otomatis (reset atau reboot mengulang fetch, §7.3.2). Tidak ada refresh runtime. |
+| **`Task Fetch`** | Low (1) | Core 0 | Mengambil `GET /graph.bin` **saat boot atau saat admin reset**, memvalidasi framing (HTTP 200, `X-Graph-Version` bukan `0`, body 676 byte, header & body dari snapshot yang sama), lalu menyalin ke buffer tetap 26 × 26. Maksimal 3 percobaan dengan jeda 2 detik; jika gagal, mem-publish `error(req_id = 0, FETCH_FAILED)` dan `status = ERROR`, tidak retry otomatis (reset atau reboot mengulang fetch, §7.3.2). Tidak ada refresh runtime. |
 
 ## 7.2 Alur Normal
 
 1. **Boot**
-   * Posisi `A` (Home), heading Utara, status `IDLE`.
-   * Robot mem-publish `adam/srv/graph_version = 0` (retain) **sebelum** `online = 1`, agar retained version dari sesi sebelumnya tidak membuat gateway menganggap robot siap.
-   * `Task Fetch` mengambil graf maksimal 3 kali dengan jeda 2 detik. Jika ketiga percobaan gagal, robot mem-publish `status = ERROR`, `graph_version` tetap `0`, dan tidak menerima job sampai admin melakukan reset atau reboot (reset mengunduh ulang graf, lihat §7.3.2).
-   * Setelah graf siap, robot mem-publish `current_pos = [A][0]`, `graph_version` sebenarnya, `status = IDLE`, baterai, dan kapasitas sampah.
+   * **Prasyarat operasional**: robot dinyalakan di posisi `A` (Home) menghadap Utara — ini kewajiban admin, bukan fakta firmware (lihat [docs/03-navigation.md](03-navigation.md) §3.1).
+   * Sebelum `online = 1`, robot mem-publish **state netral** (retain): `graph_version = 0`, `current_pos = [A][0]`, dan `status = IDLE`. Dengan urutan ini retained sesi sebelumnya (mis. `MOVING` + `[B][C]`) tidak pernah terlihat saat boot; `graph_version = 0` menahan dispatch selama fetch berjalan.
+   * Setelah state netral, robot mem-publish `online = 1` (heartbeat 10 detik).
+   * `Task Fetch` mengambil graf maksimal 3 kali dengan jeda 2 detik. Jika ketiga percobaan gagal, robot mem-publish `error(req_id = 0, FETCH_FAILED)`, `status = ERROR`, `graph_version` tetap `0`, dan tidak menerima job sampai admin melakukan reset atau reboot (reset mengunduh ulang graf, lihat §7.3.2).
+   * Jika fetch sukses, robot mem-publish `graph_version` sebenarnya, baterai, dan kapasitas sampah (`status`/`current_pos` sudah netral dari langkah awal).
 
 2. **Menerima `moveto`**
    * `Task MQTT` hanya menerima jika status `IDLE`, mailbox kosong, graf sudah siap, dan kapasitas sampah di bawah ambang penuh.
-   * Cek pasangan `(req_id, node)` di cache deduplikasi. Jika sudah pernah diproses → `ack DUPLICATE` dan jangan masukkan job lagi. Cek ini dilakukan sebelum cek `BUSY` agar retry QoS 1 tidak dianggap job baru.
+   * Cek pasangan `(req_id, node)` di cache deduplikasi. Pasangan **hanya disimpan saat `ack ACCEPTED`** — `ack` non-`ACCEPTED` (ditolak) tidak masuk cache, jadi retry setelah kondisi membaik tetap diproses sebagai job baru. Jika pasangan sudah pernah **diterima ke mailbox** → `ack DUPLICATE` dan jangan masukkan job lagi. Cek ini dilakukan sebelum cek `BUSY` agar retry QoS 1 tidak dianggap job baru. Cache berukuran tetap (buffer ring 8 entri; entri lama ditimpa), dibersihkan saat connect dan saat admin reset; `req_id 0x0000` tidak pernah disimpan.
    * Jika status `ERROR`, graf belum siap, atau `graph_version = 0` → `ack NOT_READY`.
    * Jika byte target bukan `A`–`Z` → `ack INVALID_TARGET`. Robot tidak memvalidasi ulang apakah node itu aktif di graf; gateway adalah source of truth dan hanya mengirim node aktif.
    * Jika tidak `IDLE` atau mailbox terisi → `ack BUSY`.
@@ -84,14 +85,14 @@ Firmware dijalankan menggunakan Sistem Operasi Real-Time (**FreeRTOS**) pada mik
    * Robot membersihkan seluruh state internal: mailbox, path/sedang bergerak, dan cache deduplikasi.
    * Robot mengunduh ulang graf lewat `GET /graph.bin` (maksimal 3 percobaan, jeda 2 detik, validasi framing sama dengan boot). Reset adalah satu-satunya cara memuat graf versi terbaru tanpa mematikan daya.
    * Robot mem-publish ulang **seluruh** telemetri retained: `graph_version`, `current_pos = [A][0]`, `status`, `battery`, dan `trash` — inilah mekanisme "menyetel ulang state yang basi" (misalnya `trash` setelah wadah dikosongkan di Home).
-   * Jika unduh graf gagal: `status = ERROR`, `graph_version = 0`; reset boleh diulang atau robot di-reboot.
+   * Jika unduh graf gagal: robot mem-publish `error(req_id = 0, FETCH_FAILED)`, `status = ERROR`, `graph_version = 0`; reset boleh diulang atau robot di-reboot.
    * Reset tidak mem-publish `ack`/`error` apa pun. Konfirmasi keberhasilan: retained `status = IDLE` dengan `current_pos = [A][0]` dan `graph_version` sama dengan versi graf aktif.
    * Setelah reset, penerimaan `moveto` baru mengikuti gate normal (graf siap, kapasitas di bawah ambang, dan lain-lain).
 
 3. **Robot reboot di tengah job**:
    * Robot selalu boot di `A`, heading Utara, `IDLE`.
    * Robot mengunduh graf terbaru. Gateway melihat `online = 1`, `current_pos = [A][0]`, `graph_version`, dan status `IDLE`; request yang masih `dispatched`/`serving` untuk target lain ditandai `failed`.
-   * Jika fetch graf gagal setelah 3 percobaan, robot masuk `ERROR` dengan `graph_version = 0`; gateway tidak melakukan dispatch sampai robot di-reset atau di-reboot dan berhasil memuat graf.
+   * Jika fetch graf gagal setelah 3 percobaan, robot mem-publish `error(req_id = 0, FETCH_FAILED)` dan masuk `ERROR` dengan `graph_version = 0`; gateway tidak melakukan dispatch sampai robot di-reset atau di-reboot dan berhasil memuat graf.
 
 4. **Robot offline**:
    * LWT mengirim `adam/srv/online = 0`.
@@ -136,4 +137,4 @@ Kadensi telemetri **event-driven**: `status` saat berubah; `current_pos` saat mu
 * **Anti false-arrival**: setelah tiba di satu node, persimpangan harus menghilang dari pandangan sensor sebelum node berikutnya boleh terdeteksi.
 * **Ack dan error tidak boleh tertukar**: `ack` hanya untuk penerimaan job; kegagalan navigasi selalu lewat `error` dengan `req_id` yang sama.
 * **Auto-park saat sampah penuh**: setiap transisi ke `IDLE`, firmware membaca kapasitas sampah; jika `sensors_trash_level_percent() >= SENSORS_TRASH_FULL_PERCENT`, robot langsung menghitung rute ke `A` dan bergerak ke sana dengan telemetri `MOVING`/`current_pos` biasa (job internal: tanpa `moveto`, tanpa `ack`, tanpa `req_id`), lalu menunggu `IDLE` di `A`. Pengosongan wadah dilakukan di Home; setelah wadah dikosongkan, admin mereset agar retained `trash` segar.
-* **Batas dwell total**: `DWELL_TOTAL_MAX_MS` (default 5 menit) membatasi total waktu dwell dalam satu pemberhentian, walau sensor IR tangan terus mereset timer. Setelah batas tercapai, tutup ditutup dan robot mem-publish `trash` + `IDLE` seperti biasa — robot tidak dapat terkunci di `DWELL` selamanya dan pintu reset tetap terbuka.
+* **Batas dwell total**: `DWELL_TOTAL_MAX_MS` (default **60 detik**) membatasi total waktu dwell dalam satu pemberhentian, walau sensor IR tangan terus mereset timer. Setelah batas tercapai, tutup ditutup dan robot mem-publish `trash` + `IDLE` seperti biasa — robot tidak dapat terkunci di `DWELL` selamanya dan pintu reset tetap terbuka. Robot harus singkat berhenti di tiap node (prinsip keadilan lift; antrean gateway FIFO).
