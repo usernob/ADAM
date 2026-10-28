@@ -11,6 +11,11 @@
 
 esp_err_t dwell_init(void);
 
+/* Close the trash lid now (spec 7.3.1: the lid must be closed whenever the
+ * robot enters ERROR). Callable outside dwell_run(), e.g. from Task Executor
+ * error handling or from another task. */
+void dwell_close_lid(void);
+
 /* Dwell procedure on the target node (spec 4, blocking):
  * 1) open the lid with the servo, 2) run the dwell timer and reset it
  * while the hand IR sensor at the trash opening detects a hand,

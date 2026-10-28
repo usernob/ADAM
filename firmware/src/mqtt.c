@@ -299,9 +299,11 @@ static void event_validation_task(void* pvParameters) {
                 publish_ack(job.req.id, ack_status);
 
             } else if (cmp_topic(&msg, MQTT_RESET_TOPIC)) {
-                // 6.2 - admin reset: payload is ignored, target is always Home.
-                // Flush the remaining commands so the recovery route stays clean.
+                // 6.2 / 07 §7.3.2 - admin reset: payload is ignored, target is
+                // always Home. Empty the mailbox AND drop the path currently
+                // being executed, then let the Route Finder plan the way back.
                 mqtt_flush_jobs();
+                executor_cancel_active_path();
                 adam_job_t job = {
                     .req.id = 0,
                     .req.node = 0,

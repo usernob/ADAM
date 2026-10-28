@@ -24,9 +24,12 @@ static const char* TAG = "executor";
 
 // s_state = what the task loop is doing, s_status = published wire code
 // (adam_status_t). OBSTACLE is reserved and no longer emitted.
+// STATE_DWELL keeps "serving at the lid" distinct from STATE_IDLE so internal
+// code can tell an idle robot from one that is still in its dwell window.
 typedef enum {
     STATE_IDLE,
     STATE_MOVING,
+    STATE_DWELL,
     STATE_ERROR,
 } exec_state_t;
 
@@ -43,7 +46,9 @@ static executor_telemetry_t s_telemetry = {
     .current_pos = {'A', 0},
 };
 static int s_published_status = -1;
-static void publish_state(size_t current, size_t next, adam_status_t status, bool boot_settled);
+// next < 0 = no next node; see publish_state()
+#define POS_NEXT_NONE (-1)
+static void publish_state(size_t current, int next, adam_status_t status, bool boot_settled);
 
 // PID line follower constants (base speed 160, Kp 45, Kd 18)
 #define PID_BASE_SPEED 160
@@ -129,22 +134,25 @@ static bool boot_status_settle(void) {
     if (graph_fetch_has_failed()) {
         // No error topic: there is no request behind a failed boot fetch, and
         // graph_version stays 0 (06:317). The robot takes no job until reboot.
-        publish_state(path_resolver_current(), 0, ADAM_STATUS_ERROR, true);
+        publish_state(path_resolver_current(), POS_NEXT_NONE, ADAM_STATUS_ERROR, true);
         ESP_LOGE(TAG, "Fetch failed after all retries, boot status = ERROR (07:38)");
         return true;
     }
     if (!graph_ready()) {
         return false;
     }
-    publish_state(path_resolver_current(), 0, ADAM_STATUS_IDLE, true);
+    publish_state(path_resolver_current(), POS_NEXT_NONE, ADAM_STATUS_IDLE, true);
     return true;
 }
 
-// current_pos = [current][next], 2 byte retain; next = 0 when heading nowhere
+// current_pos = [current][next], 2 byte retain; next = 0 when heading nowhere.
+// next is a node *index*, so it needs its own "none" value: 0 is node 'A', while
+// the wire sentinel for "no next node" is 0x00 (06-protocol.md:349). Passing 0
+// here would report "nowhere" whenever the robot heads for Home.
 // The mutex serializes state updates with MQTT replay through both publish calls;
 // the critical section protects the small shared snapshot itself.
-static void publish_state(size_t current, size_t next, adam_status_t status, bool boot_settled) {
-    uint8_t pos[2] = {(uint8_t)(current + 'A'), (uint8_t)(next ? next + 'A' : 0)};
+static void publish_state(size_t current, int next, adam_status_t status, bool boot_settled) {
+    uint8_t pos[2] = {(uint8_t)(current + 'A'), (uint8_t)(next >= 0 ? next + 'A' : 0)};
     bool status_changed;
 
     xSemaphoreTake(s_telemetry_publish_mutex, portMAX_DELAY);
@@ -176,27 +184,66 @@ static void publish_trash(void) {
     mqtt_publish(MQTT_TRASH_TOPIC, (const char*)&trash, 1, 1, true);
 }
 
-void executor_set_error(uint16_t req_id, adam_error_t reason) {
-    if (s_state == STATE_ERROR) {
+/* One dwell on the target node (spec 4): publish DWELL, run the blocking dwell
+ * window, then settle back to IDLE. The rollback is conditional because
+ * executor_set_error() can be raised from the Route Finder task while
+ * dwell_run() blocks - its ERROR status must not be overwritten by IDLE. */
+static void run_dwell(size_t node) {
+    s_state = STATE_DWELL;
+    publish_state(node, POS_NEXT_NONE, ADAM_STATUS_DWELL, false);
+    dwell_run();
+    publish_trash();
+
+    if (s_state != STATE_DWELL) {
+        ESP_LOGW(TAG, "Dwell ended with state %d already taken over, not settling to IDLE", (int)s_state);
         return;
     }
-    s_state = STATE_ERROR;
+    s_state = STATE_IDLE;
+    publish_state(node, POS_NEXT_NONE, ADAM_STATUS_IDLE, false);
+}
 
-    // Spec 7.2: stop the motor and flush every queue
-    motor_halt();
-    path_resolver_flush_paths();
-    mqtt_flush_jobs();
-
-    // [req_id:2 LE][code:1]; the id comes from the caller so it can never be
-    // stale (06:348), 0 for an error that belongs to no request (07:76)
+// [req_id:2 LE][code:1], QoS 1, no retain (06:348). The id comes from the
+// caller so it can never be stale; 0 for an error that belongs to no request
+// (07:76). Single writer for adam/srv/error.
+static void publish_error(uint16_t req_id, adam_error_t reason) {
     adam_req_t data = {
         .id = req_id,
         .code = reason,
     };
     mqtt_publish(MQTT_ERROR_TOPIC, (const char*)&data, 3, 1, false);
+}
+
+void executor_set_error(uint16_t req_id, adam_error_t reason) {
+    if (s_state == STATE_ERROR) {
+        // Already stopped: the state transition must not repeat, but 07:84 still
+        // requires the failure to reach the gateway - a reset that finds no route
+        // back to Home reports error(req_id=0, NO_PATH) while already ERROR.
+        publish_error(req_id, reason);
+        ESP_LOGE(TAG, "Already in ERROR: %s reported without re-entering (07:84)", err_name(reason));
+        return;
+    }
+    s_state = STATE_ERROR;
+
+    // Spec 7.3.1: the motor stops and the lid is closed
+    motor_halt();
+    dwell_close_lid();
+    // Spec 7.2: flush every queue
+    path_resolver_flush_paths();
+    mqtt_flush_jobs();
+
+    publish_error(req_id, reason);
     // Update current_pos and status in one snapshot transaction (07:76).
-    publish_state(path_resolver_current(), 0, ADAM_STATUS_ERROR, false);
+    publish_state(path_resolver_current(), POS_NEXT_NONE, ADAM_STATUS_ERROR, false);
     ESP_LOGE(TAG, "ERROR: %s, robot stopped and waits for an admin reset (spec 7.2)", err_name(reason));
+}
+
+// Raised by the MQTT task when an admin reset arrives mid-ride (07 §7.3.2).
+// Only a flag: the executor loop is the sole writer of s_nav/s_state, so a
+// cross-task request can never race the navigation state.
+static volatile bool s_reset_requested = false;
+
+void executor_cancel_active_path(void) {
+    s_reset_requested = true;
 }
 
 // Turn onto the edge direction and reset the deadline (spec 3.2). Returns false
@@ -219,7 +266,7 @@ static bool move_begin_step(void) {
     s_state = STATE_MOVING;
 
     // Edge start enters MOVING; update status and current_pos atomically (07:58).
-    publish_state(from, to, ADAM_STATUS_MOVING, false);
+    publish_state(from, (int)to, ADAM_STATUS_MOVING, false);
 
     s_step_deadline = now_ms() + STEP_TIMEOUT_MS;
     s_no_line_since = -1;
@@ -337,23 +384,21 @@ static void moving_tick(void) {
         // Path finished; publish the destination with its settled status directly.
         s_junction_run = 0;
 
-        if (!s_nav.job.reset) {
-            // Dwell on the target node (spec 4) after a normal ride.
-            publish_state(to, 0, ADAM_STATUS_DWELL, false);
-            dwell_run();
-            publish_trash();
-            publish_state(to, 0, ADAM_STATUS_IDLE, false);
-        } else {
+        if (s_nav.job.reset) {
             // Admin recovery skips dwell and settles directly to IDLE.
-            publish_state(to, 0, ADAM_STATUS_IDLE, false);
+            publish_state(to, POS_NEXT_NONE, ADAM_STATUS_IDLE, false);
+            s_state = STATE_IDLE;
+            ESP_LOGI(TAG, "Recovery navigation finished, back to IDLE");
+        } else {
+            // Dwell on the target node (spec 4) after a normal ride.
+            ESP_LOGI(TAG, "Normal navigation finished, dwell on %c", (int)(to + 'A'));
+            run_dwell(to);
         }
-        s_state = STATE_IDLE;
-        ESP_LOGI(TAG, "%s navigation finished, back to IDLE", s_nav.job.reset ? "Recovery" : "Normal");
         return;
     }
 
     // Intermediate arrival remains MOVING while pointing to the next node.
-    publish_state(to, s_nav.path[s_step], ADAM_STATUS_MOVING, false);
+    publish_state(to, (int)s_nav.path[s_step], ADAM_STATUS_MOVING, false);
 
     // Start the next edge; move_begin_step publishes its [from][to] snapshot.
     // A failed edge lookup transitions to ERROR directly.
@@ -381,12 +426,19 @@ static void idle_tick(void) {
     s_wait_clear = true; // do not detect a node while still on the start node
 
     if (s_nav.len == 1) {
+        if (s_nav.job.reset) {
+            // 07:83 - a reset that lands on Home already only turns the heading
+            // to north and returns to IDLE; opening the lid here would run a
+            // dwell nobody asked for.
+            motor_turn_to_heading(DIR_NORTH);
+            publish_state(path_resolver_current(), POS_NEXT_NONE, ADAM_STATUS_IDLE, false);
+            s_state = STATE_IDLE;
+            ESP_LOGW(TAG, "Reset while idle on Home: heading fixed to north, back to IDLE");
+            return;
+        }
         // Target = current position: dwell right away (spec 4), without moving
-        publish_state(s_nav.path[0], 0, ADAM_STATUS_DWELL, false);
-        dwell_run();
-        publish_trash();
-        publish_state(s_nav.path[0], 0, ADAM_STATUS_IDLE, false);
-        ESP_LOGI(TAG, "Already on the target node, dwell finished");
+        ESP_LOGI(TAG, "Already on the target node, dwell right away");
+        run_dwell(s_nav.path[0]);
         return;
     }
 
@@ -405,6 +457,23 @@ static void executor(void* pvParameters) {
     }
 
     for (;;) {
+        // 07 §7.3.2 - an admin reset abandons the path being executed so the
+        // recovery route to Home is not stuck behind it. Consumed here, at a
+        // point where the executor owns the navigation state.
+        if (s_reset_requested) {
+            s_reset_requested = false;
+            if (s_state == STATE_MOVING) {
+                motor_halt();
+                s_step = 0;
+                s_nav.len = 0;
+                // a half-counted junction must not survive into the next ride
+                s_junction_run = 0;
+                s_junction_valid = false;
+                s_state = STATE_IDLE;
+                ESP_LOGW(TAG, "Reset: active path cancelled while leaving %c", (int)(path_resolver_current() + 'A'));
+            }
+        }
+
         switch (s_state) {
         case STATE_MOVING:
             moving_tick();
@@ -413,6 +482,14 @@ static void executor(void* pvParameters) {
 
         case STATE_IDLE:
             idle_tick();
+            break;
+
+        case STATE_DWELL:
+            // Unreachable while dwell_run() blocks the task itself; kept so a
+            // state handed over from another task cannot fall into `default`
+            // and spin without yielding.
+            motor_halt();
+            vTaskDelay(pdMS_TO_TICKS(50));
             break;
 
         case STATE_ERROR:
@@ -429,7 +506,7 @@ static void executor(void* pvParameters) {
 
                     if (nav.len == 1) { // Reset while already on Home: only fix the heading
                         motor_turn_to_heading(DIR_NORTH);
-                        publish_state(path_resolver_current(), 0, ADAM_STATUS_IDLE, false);
+                        publish_state(path_resolver_current(), POS_NEXT_NONE, ADAM_STATUS_IDLE, false);
                         s_state = STATE_IDLE;
                         ESP_LOGI(TAG, "Recovery finished (already on Home)");
                         break;

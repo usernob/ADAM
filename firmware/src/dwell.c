@@ -78,6 +78,10 @@ esp_err_t dwell_init(void) {
     return ESP_OK;
 }
 
+void dwell_close_lid(void) {
+    servo_write_deg(DWELL_SERVO_CLOSE_DEG);
+}
+
 void dwell_run(void) {
     ESP_LOGI(TAG, "Reached the target node, opening the lid (servo %d deg)", DWELL_SERVO_OPEN_DEG);
     servo_write_deg(DWELL_SERVO_OPEN_DEG);
