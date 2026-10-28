@@ -20,10 +20,11 @@ void executor_publish_telemetry(void);
 // (spec 7.2/7.3). req_id = the job that failed, 0 for an error without a request.
 void executor_set_error(uint16_t req_id, adam_error_t reason);
 
-/* Admin reset arriving mid-ride (spec 07 §7.3.2): drop the path being executed
- * so the recovery route to Home is not queued behind it. Called from the MQTT
- * task; it only raises a flag that the executor loop consumes, so s_nav and
- * s_state are never mutated from another task. */
-void executor_cancel_active_path(void);
+/* Admin reset (07 §7.3.2): only raises a flag that the executor loop consumes
+ * while the robot is not serving (IDLE or ERROR); during MOVING/DWELL the flag
+ * is dropped without a response (the gateway rejected it with 409 first).
+ * The executor is the sole writer of the navigation state, so the MQTT task
+ * never mutates it directly. */
+void executor_request_reset(void);
 
 #endif // SRC_EXECUTOR_H

@@ -254,7 +254,6 @@ static void event_validation_task(void* pvParameters) {
                 adam_job_t job = {
                     .req.id = req_id,
                     .req.node = msg.data[2],
-                    .reset = false,
                 };
 
                 // 07:43 - dedup before everything but the payload length, so a
@@ -297,17 +296,21 @@ static void event_validation_task(void* pvParameters) {
                 publish_ack(job.req.id, ack_status);
 
             } else if (cmp_topic(&msg, MQTT_RESET_TOPIC)) {
-                // 6.2 / 07 §7.3.2 - admin reset: payload is ignored, target is
-                // always Home. Empty the mailbox AND drop the path currently
-                // being executed, then let the Route Finder plan the way back.
+                adam_status_t status = executor_status();
+                if (status != ADAM_STATUS_IDLE && status != ADAM_STATUS_ERROR) {
+                    // 07 §7.3.2 - the reset is only accepted while the robot is
+                    // not serving; the gateway rejected it with 409 first, so a
+                    // command that still arrives here is logged and dropped.
+                    ESP_LOGW(TAG, "admin reset ignored while serving (status=%d)", (int)status);
+                    continue;
+                }
+                // 06 §6.2 / 07 §7.3.2 - reset = state fresh: empty the mailbox
+                // and the dedup cache (a retried req_id must be judged against
+                // the fresh state), then the executor re-fetches the graph and
+                // forces [A][0] north. No ack/error is ever sent for a reset.
                 mqtt_flush_jobs();
-                executor_cancel_active_path();
-                adam_job_t job = {
-                    .req.id = 0,
-                    .req.node = 0,
-                    .reset = true,
-                };
-                xQueueSend(s_job_queue, &job, (TickType_t)0);
+                dedup_clear();
+                executor_request_reset();
             }
         }
     }

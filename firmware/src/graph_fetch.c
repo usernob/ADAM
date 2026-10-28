@@ -134,23 +134,20 @@ static esp_err_t fetch_and_apply(void) {
     return ESP_OK;
 }
 
-// Spec 07 §7.1: Task Fetch, low priority (1), core 0. Runs once at boot and
-// then deletes itself, so no idle task is left behind.
-static void graph_fetch_task(void* pvParameters) {
+bool graph_fetch_run(void) {
+    s_fetch_failed = false;
+
     // Do not touch the socket before WiFi has an IP. Bound this wait so the
-    // executor can settle boot status to ERROR when the AP never connects.
+    // caller can settle status to ERROR when the AP never connects.
     if (!wifi_wait_connected(FETCH_WIFI_WAIT_MS)) {
-        ESP_LOGE(TAG, "WiFi did not obtain an IP within %d ms; boot fetch failed", FETCH_WIFI_WAIT_MS);
+        ESP_LOGE(TAG, "WiFi did not obtain an IP within %d ms; fetch failed", FETCH_WIFI_WAIT_MS);
         s_fetch_failed = true;
-        vTaskDelete(NULL);
-        return;
+        return false;
     }
 
-    bool installed = false;
     for (int attempt = 1; attempt <= FETCH_RETRY_COUNT; attempt++) {
         if (fetch_and_apply() == ESP_OK) {
-            installed = true;
-            break;
+            return true;
         }
         ESP_LOGW(TAG, "attempt %d/%d failed", attempt, FETCH_RETRY_COUNT);
         if (attempt < FETCH_RETRY_COUNT) {
@@ -158,12 +155,16 @@ static void graph_fetch_task(void* pvParameters) {
         }
     }
 
-    if (!installed) {
-        // 06:317 / 07:38: graph_version stays 0, no retry until reboot, and
-        // the boot status becomes ERROR instead of IDLE
-        s_fetch_failed = true;
-    }
+    // 06 §6.4 / 07 §7.3.2: graph_version stays 0, no retry until admin reset
+    // or reboot
+    s_fetch_failed = true;
+    return false;
+}
 
+// Spec 07 §7.1: Task Fetch, low priority (1), core 0. Runs once at boot and
+// then deletes itself, so no idle task is left behind.
+static void graph_fetch_task(void* pvParameters) {
+    graph_fetch_run();
     // One-shot: fetch settled (success or out of retries), release the stack
     vTaskDelete(NULL);
 }

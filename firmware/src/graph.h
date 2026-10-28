@@ -42,6 +42,12 @@ bool graph_get(const uint8_t** edges);
 // Installed matrix version, 0 = no ready graph yet (adam/srv/graph_version)
 uint32_t graph_version(void);
 
+/* Drop the installed matrix back to "not ready" (version 0). Used when an
+ * admin reset fails to re-fetch the graph, so the local gates (graph_get,
+ * graph_ready) see the same state the robot reports on adam/srv/graph_version
+ * (07 §7.3.2). */
+void graph_invalidate(void);
+
 // Matrix installed under version != 0: gate for accepting jobs (07:44) and for
 // the gateway to dispatch
 bool graph_ready(void);

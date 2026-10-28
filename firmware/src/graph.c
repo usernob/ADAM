@@ -35,6 +35,10 @@ uint32_t graph_version(void) {
     return version;
 }
 
+void graph_invalidate(void) {
+    s_version = 0;
+}
+
 bool graph_ready(void) {
     const uint8_t* edges;
     return graph_version() != 0 && graph_get(&edges);

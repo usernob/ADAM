@@ -210,11 +210,11 @@ static void publish_error(uint16_t req_id, adam_error_t reason) {
 
 void executor_set_error(uint16_t req_id, adam_error_t reason) {
     if (s_state == STATE_ERROR) {
-        // Already stopped: the state transition must not repeat, but 07:84 still
-        // requires the failure to reach the gateway - a reset that finds no route
-        // back to Home reports error(req_id=0, NO_PATH) while already ERROR.
+        // Already stopped: the state transition must not repeat, but the
+        // failure still has to reach the gateway - e.g. a job that raced
+        // into the ERROR window reports its own error here (07 §7.3).
         publish_error(req_id, reason);
-        ESP_LOGE(TAG, "Already in ERROR: %s reported without re-entering (07:84)", err_name(reason));
+        ESP_LOGE(TAG, "Already in ERROR: %s reported without re-entering", err_name(reason));
         return;
     }
     s_state = STATE_ERROR;
@@ -232,13 +232,60 @@ void executor_set_error(uint16_t req_id, adam_error_t reason) {
     ESP_LOGE(TAG, "ERROR: %s, robot stopped and waits for an admin reset (spec 7.2)", err_name(reason));
 }
 
-// Raised by the MQTT task when an admin reset arrives mid-ride (07 §7.3.2).
-// Only a flag: the executor loop is the sole writer of s_nav/s_state, so a
-// cross-task request can never race the navigation state.
-static volatile bool s_reset_requested = false;
+// Raised by the MQTT task when an admin reset is accepted (07 §7.3.2). Only a
+// flag: the executor loop is the sole writer of s_nav/s_state, so a cross-task
+// request can never race the navigation state.
+static volatile bool s_reset_pending = false;
 
-void executor_cancel_active_path(void) {
-    s_reset_requested = true;
+void executor_request_reset(void) {
+    s_reset_pending = true;
+}
+
+/* Admin reset = state fresh, a reboot without cutting power (07 §7.3.2):
+ * clear every internal piece of state, force the logical position to Home
+ * facing north - placing the robot there is an operational prerequisite the
+ * firmware cannot verify - re-fetch the graph with the boot rules, and
+ * republish the whole retained telemetry so stale state (e.g. trash emptied
+ * at Home) is refreshed. The reset itself never gets an ack/error; success is
+ * the retained IDLE + [A][0] + matching graph_version. */
+static void perform_reset(void) {
+    ESP_LOGW(TAG, "Admin reset: clearing state, re-fetch graph, force [A][0] north");
+
+    motor_halt();
+    dwell_close_lid();
+    path_resolver_flush_paths();
+    mqtt_flush_jobs();
+    s_nav.len = 0;
+    s_step = 0;
+    s_junction_run = 0;
+    s_junction_valid = false;
+    s_wait_clear = false;
+    s_last_error = 0.0f;
+
+    path_resolver_set_current(0);
+    motor_turn_to_heading(DIR_NORTH);
+    publish_state(0, POS_NEXT_NONE, ADAM_STATUS_IDLE);
+
+    // Re-fetch with the boot rules: version 0 while loading, and on failure
+    // version stays 0 so every gate refuses jobs (06 §6.4, 07 §7.3.2).
+    graph_invalidate();
+    mqtt_publish_graph_version(0);
+    if (graph_fetch_run()) {
+        // Republish the full retained telemetry even if nothing changed.
+        s_published_status = -1; // force the status out again
+        publish_state(0, POS_NEXT_NONE, ADAM_STATUS_IDLE);
+        uint8_t battery = sensors_battery_percent();
+        uint8_t trash = sensors_trash_level_percent();
+        mqtt_publish(MQTT_BATTERY_TOPIC, (const char*)&battery, 1, 1, true);
+        mqtt_publish(MQTT_TRASH_TOPIC, (const char*)&trash, 1, 1, true);
+        s_state = STATE_IDLE;
+        ESP_LOGI(TAG, "Reset done: IDLE at [A][0], graph version %d", (int)graph_version());
+    } else {
+        publish_error(0, ADAM_ERR_FETCH_FAILED);
+        publish_state(0, POS_NEXT_NONE, ADAM_STATUS_ERROR);
+        s_state = STATE_ERROR;
+        ESP_LOGE(TAG, "Reset: graph re-fetch failed, robot stays ERROR (07 §7.3.2)");
+    }
 }
 
 // Turn onto the edge direction and reset the deadline (spec 3.2). Returns false
@@ -379,16 +426,9 @@ static void moving_tick(void) {
         // Path finished; publish the destination with its settled status directly.
         s_junction_run = 0;
 
-        if (s_nav.job.reset) {
-            // Admin recovery skips dwell and settles directly to IDLE.
-            publish_state(to, POS_NEXT_NONE, ADAM_STATUS_IDLE);
-            s_state = STATE_IDLE;
-            ESP_LOGI(TAG, "Recovery navigation finished, back to IDLE");
-        } else {
-            // Dwell on the target node (spec 4) after a normal ride.
-            ESP_LOGI(TAG, "Normal navigation finished, dwell on %c", (int)(to + 'A'));
-            run_dwell(to);
-        }
+        // Dwell on the target node (spec 4) after a normal ride.
+        ESP_LOGI(TAG, "Normal navigation finished, dwell on %c", (int)(to + 'A'));
+        run_dwell(to);
         return;
     }
 
@@ -421,16 +461,6 @@ static void idle_tick(void) {
     s_wait_clear = true; // do not detect a node while still on the start node
 
     if (s_nav.len == 1) {
-        if (s_nav.job.reset) {
-            // 07:83 - a reset that lands on Home already only turns the heading
-            // to north and returns to IDLE; opening the lid here would run a
-            // dwell nobody asked for.
-            motor_turn_to_heading(DIR_NORTH);
-            publish_state(path_resolver_current(), POS_NEXT_NONE, ADAM_STATUS_IDLE);
-            s_state = STATE_IDLE;
-            ESP_LOGW(TAG, "Reset while idle on Home: heading fixed to north, back to IDLE");
-            return;
-        }
         // Target = current position: dwell right away (spec 4), without moving
         ESP_LOGI(TAG, "Already on the target node, dwell right away");
         run_dwell(s_nav.path[0]);
@@ -445,27 +475,23 @@ static void idle_tick(void) {
 static void executor(void* pvParameters) {
     ESP_LOGI(TAG, "Task Executor ON: PID 100 Hz (Kp=%d, Kd=%d), core 1, prio 3", (int)PID_KP, (int)PID_KD);
 
-    // No status before Task Fetch settled (07:38-39): IDLE only with a real
+    // No status before Task Fetch settled (07 §7.2): IDLE only with a real
     // graph, ERROR when all 3 attempts failed
     while (!boot_status_settle()) {
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 
     for (;;) {
-        // 07 §7.3.2 - an admin reset abandons the path being executed so the
-        // recovery route to Home is not stuck behind it. Consumed here, at a
-        // point where the executor owns the navigation state.
-        if (s_reset_requested) {
-            s_reset_requested = false;
-            if (s_state == STATE_MOVING) {
-                motor_halt();
-                s_step = 0;
-                s_nav.len = 0;
-                // a half-counted junction must not survive into the next ride
-                s_junction_run = 0;
-                s_junction_valid = false;
-                s_state = STATE_IDLE;
-                ESP_LOGW(TAG, "Reset: active path cancelled while leaving %c", (int)(path_resolver_current() + 'A'));
+        // 07 §7.3.2 - an admin reset is accepted only while IDLE or ERROR; the
+        // MQTT task only raises the flag, and it is consumed here, the point
+        // where the executor owns the navigation state. While serving
+        // (MOVING/DWELL) the flag is dropped without a response.
+        if (s_reset_pending) {
+            s_reset_pending = false;
+            if (s_state == STATE_IDLE || s_state == STATE_ERROR) {
+                perform_reset();
+            } else {
+                ESP_LOGW(TAG, "Reset ignored while serving (state %d)", (int)s_state);
             }
         }
 
@@ -488,35 +514,10 @@ static void executor(void* pvParameters) {
             break;
 
         case STATE_ERROR:
-            // Spec 7.2: the robot stays on current_node and waits for the admin.
-            // Only a 'recovery' path (from the reset command) is accepted.
+            // Spec 7.2: the robot stays where it is and waits for the admin;
+            // the reset flag consumed above is the only way out (07 §7.3.2).
             motor_halt();
-            {
-                nav_path_t nav;
-                bool got = path_resolver_get_nav(&nav);
-                if (got && nav.job.reset && nav.len >= 1) {
-                    ESP_LOGW(TAG, "Recovery: admin reset route accepted (%d nodes)", (int)nav.len);
-                    s_nav = nav;
-                    s_wait_clear = true;
-
-                    if (nav.len == 1) { // Reset while already on Home: only fix the heading
-                        motor_turn_to_heading(DIR_NORTH);
-                        publish_state(path_resolver_current(), POS_NEXT_NONE, ADAM_STATUS_IDLE);
-                        s_state = STATE_IDLE;
-                        ESP_LOGI(TAG, "Recovery finished (already on Home)");
-                        break;
-                    }
-
-                    s_step = 1;
-                    if (!move_begin_step()) {
-                        executor_set_error(nav.job.req.id, ADAM_ERR_NO_PATH);
-                    }
-                } else if (got) {
-                    ESP_LOGW(TAG, "Non recovery path ignored while in ERROR");
-                } else {
-                    vTaskDelay(pdMS_TO_TICKS(200));
-                }
-            }
+            vTaskDelay(pdMS_TO_TICKS(200));
             break;
 
         default:

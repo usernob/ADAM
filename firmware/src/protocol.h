@@ -49,10 +49,9 @@ typedef struct {
     };
 } adam_req_t;
 
-// One command from the gateway: target node or admin reset, with its request
+// One command from the gateway: target node (docs/06-protocol.md)
 typedef struct {
     adam_req_t req;
-    bool reset;
 } adam_job_t;
 
 #endif // SRC_PROTOCOL_H
