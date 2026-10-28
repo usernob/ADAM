@@ -9,9 +9,11 @@ esp_err_t executor_init(void);
 // Current robot status (published wire code, docs/06-protocol.md)
 adam_status_t executor_status(void);
 
-// Replay one coherent retained status/current_pos snapshot. Returns false until
-// boot has settled to graph-ready IDLE or fetch-failed ERROR.
-bool executor_replay_telemetry(void);
+/* Publish the retained status + [current][next] snapshot. Called from the MQTT
+ * connect handler BEFORE online = 1: at boot the snapshot is the neutral
+ * IDLE + [A][0] (06 §6.4 boot order), on reconnect it is the live state
+ * including the active edge during MOVING (07 §7.4). */
+void executor_publish_telemetry(void);
 
 // Enter ERROR (LINE_LOST / NODE_TIMEOUT / NO_PATH): publish [req_id:2][code:1]
 // + current_pos + status, halt the motor, close the lid, flush every queue

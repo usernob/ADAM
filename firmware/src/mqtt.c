@@ -149,20 +149,18 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_
     case MQTT_EVENT_CONNECTED:
         ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
 
-        // the dedup cache never survives a reconnect (07:122)
+        // the dedup cache never survives a reconnect (07 §7.2)
         dedup_clear();
 
-        // graph_version first (0 = not ready), then online = 1 (07:37)
+        // Boot order (06 §6.4): neutral state first - graph_version 0 during
+        // the fetch window, plus the telemetry snapshot (IDLE + [A][0] at
+        // boot, the live state on reconnect) - and only then online = 1, so a
+        // stale retained MOVING is never visible while the graph loads.
         mqtt_publish_graph_version(graph_version());
+        executor_publish_telemetry();
         mqtt_publish_u8(MQTT_ONLINE_TOPIC, 0x01, 1, true);
 
-        // Re-send the current retained status and [current][next] on every
-        // connection, including the active edge during MOVING (07:72, 7.4).
-        for (int attempt = 0; attempt < 3 && !executor_replay_telemetry(); attempt++) {
-            vTaskDelay(pdMS_TO_TICKS(20));
-        }
-
-        // battery and trash have no other trigger than connect (07:39,111)
+        // battery and trash have no other trigger than connect (07 §7.4)
         uint8_t battery = sensors_battery_percent();
         uint8_t trash = sensors_trash_level_percent();
         mqtt_publish(MQTT_BATTERY_TOPIC, (const char*)&battery, 1, 1, true);
@@ -411,6 +409,10 @@ void mqtt_publish_graph_version(uint32_t version) {
 }
 
 bool mqtt_get_job_blocked(adam_job_t* job) {
+    // The Route Finder may start before mqtt_app_start() created the queue
+    if (s_job_queue == NULL) {
+        return false;
+    }
     return xQueueReceive(s_job_queue, job, portMAX_DELAY) == pdTRUE;
 }
 

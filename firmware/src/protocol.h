@@ -33,6 +33,9 @@ typedef enum {
     ADAM_ERR_LINE_LOST = 2,
     ADAM_ERR_NODE_TIMEOUT = 3,
     ADAM_ERR_INVALID_TARGET = 4,
+    // GET /graph.bin failed after all retries (boot or reset); version stays 0
+    // (06 §6.4, append-only)
+    ADAM_ERR_FETCH_FAILED = 5,
 } adam_error_t;
 
 // [req_id:2 little-endian][byte:1]; req_id 0x0000 is reserved (06-protocol.md)

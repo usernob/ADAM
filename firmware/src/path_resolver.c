@@ -152,9 +152,11 @@ static void path_resolver(void* pvParameters) {
             continue;
         }
 
-        // Wait for a command from the server (move or admin reset)
+        // Wait for a command from the server (move or internal job). False
+        // only while the MQTT mailbox does not exist yet (startup ordering).
         adam_job_t job;
         if (!mqtt_get_job_blocked(&job)) {
+            vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
 
