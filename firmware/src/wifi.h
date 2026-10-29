@@ -5,10 +5,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// WiFi parameters
-#define WIFI_SSID "Wokwi-GUEST"
-#define WIFI_PASS ""
-
 esp_err_t wifi_init_sta();
 
 /* Wait up to timeout_ms for the STA to obtain an IP. */

@@ -48,15 +48,16 @@ void app_main() {
     // Boot on Node 'A' facing north, status IDLE (spec 3.1)
     ESP_ERROR_CHECK_WITHOUT_ABORT(wifi_init_sta());
 
+    // The graph is downloaded from the server (GET /graph.bin, https) - Task Fetch
+    // fetch need to be done before anything under it can run
+    ESP_ERROR_CHECK(graph_fetch_init());
+
     // Consumers before the producer: the MQTT connect handler publishes the
     // neutral boot snapshot (graph_version, [A][0], IDLE) before online = 1
     // (spec 06 §6.4), so the executor must be initialized before the client
     // can connect. The Route Finder simply waits for the mailbox.
     ESP_ERROR_CHECK(path_resolver_init());
     ESP_ERROR_CHECK(executor_init());
-
-    // The graph is downloaded from the server (GET /graph.bin, https) - Task Fetch
-    ESP_ERROR_CHECK(graph_fetch_init());
 
     ESP_ERROR_CHECK(mqtt_app_start());
 }

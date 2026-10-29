@@ -16,6 +16,8 @@ sta.trans_d,data,u8,0
 sta.sae_h2e,data,u8,0
 sta.sae_pk_mode,data,u8,0
 mqtt,namespace,,
-mqtt.uri,data,string,mqtts://my-mqtt-broker:8883
+mqtt.uri,data,string,wss://my-mqtt-broker:8883/mqtt
 mqtt.username,data,string,username
 mqtt.password,data,string,somethingsecret
+server,namespace,,
+server.url,data,string,https://my-server.com

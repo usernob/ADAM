@@ -11,15 +11,18 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "graph.h"
+#include "graph_fetch.h"
 #include "mqtt_client.h"
-#include "path_resolver.h"
+#include "nvs.h"
 #include "portmacro.h"
 #include "protocol.h"
 #include "sdkconfig.h"
 #include "sensors.h"
 #include <inttypes.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #if CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
@@ -318,10 +321,47 @@ static void event_validation_task(void* pvParameters) {
 }
 
 esp_err_t mqtt_app_start(void) {
+    // Barrier, not a gate: the boot fetch already ran (main.c calls
+    // graph_fetch_init first), so this waits for it to settle and keeps the
+    // two TLS sessions from overlapping. A failed fetch must still start the
+    // client - ERROR/FETCH_FAILED is reported over MQTT (06 §6.4, 07 §7.2).
+    if (!graph_fetch_success()) {
+        ESP_LOGW(TAG, "Graph fetch failed, starting MQTT anyway to report ERROR");
+    }
+    nvs_handle_t nvs_handle;
+    // Opening can fail (namespace not provisioned yet), so it must not jump to
+    // the close label with an invalid handle.
+    esp_err_t ret = nvs_open("mqtt", NVS_READONLY, &nvs_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open nvs namespace mqtt: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    size_t required_size;
+    ESP_GOTO_ON_ERROR(nvs_get_str(nvs_handle, "mqtt.uri", NULL, &required_size), nvs_close_on_error, TAG,
+                      "Failed to get nvs required size for %s", "mqtt.uri");
+    char mqtt_uri[256];
+    ESP_GOTO_ON_ERROR(nvs_get_str(nvs_handle, "mqtt.uri", mqtt_uri, &required_size), nvs_close_on_error, TAG,
+                      "Failed to get %s from nvs", "mqtt.uri");
+
+    ESP_GOTO_ON_ERROR(nvs_get_str(nvs_handle, "mqtt.username", NULL, &required_size), nvs_close_on_error, TAG,
+                      "Failed to get nvs required size for %s", "mqtt.username");
+    char mqtt_username[256];
+    ESP_GOTO_ON_ERROR(nvs_get_str(nvs_handle, "mqtt.username", mqtt_username, &required_size), nvs_close_on_error, TAG,
+                      "Failed to get %s from nvs", "mqtt.username");
+
+    ESP_GOTO_ON_ERROR(nvs_get_str(nvs_handle, "mqtt.password", NULL, &required_size), nvs_close_on_error, TAG,
+                      "Failed to get nvs required size for %s", "mqtt.password");
+    char mqtt_password[256];
+    ESP_GOTO_ON_ERROR(nvs_get_str(nvs_handle, "mqtt.password", mqtt_password, &required_size), nvs_close_on_error, TAG,
+                      "Failed to get %s from nvs", "mqtt.password");
+
+    nvs_close(nvs_handle);
+
     const esp_mqtt_client_config_t mqtt_cfg = {
         .broker =
             {
-                .address.uri = MQTT_BROKER_URI,
+                .address.uri = mqtt_uri,
 
                 .verification =
                     {
@@ -333,8 +373,8 @@ esp_err_t mqtt_app_start(void) {
         .credentials =
             {
                 .client_id = "adam-robot",
-                .username = MQTT_USERNAME,
-                .authentication.password = MQTT_PASSWORD,
+                .username = mqtt_username,
+                .authentication.password = mqtt_password,
             },
         .session =
             {
@@ -384,6 +424,10 @@ esp_err_t mqtt_app_start(void) {
     ESP_RETURN_ON_ERROR(esp_register_shutdown_handler(publish_offline), TAG, "Failed to register shutdown handler");
 
     return ESP_OK;
+
+nvs_close_on_error:
+    nvs_close(nvs_handle);
+    return ret;
 }
 
 void mqtt_publish(const char* topic, const char* data, int len, int qos, int retain) {

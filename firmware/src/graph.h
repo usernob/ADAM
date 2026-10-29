@@ -31,7 +31,7 @@ extern const char* STR_DIR[4];
 
 // clang-format off
 // dummy graph
-extern const uint8_t dummy_graph[26][26];
+extern const uint8_t dummy_graph[GRAPH_SIZE];
 // clang-format on
 
 esp_err_t graph_update(const uint8_t* data, uint32_t version);

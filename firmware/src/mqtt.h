@@ -6,11 +6,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// MQTT config, currently just hardcoded for ease to use
-#define MQTT_BROKER_URI "mqtts://s997b122.ala.us-east-1.emqxsl.com:8883"
-#define MQTT_USERNAME "adam"
-#define MQTT_PASSWORD "somethingsecret"
-
 // Server -> robot topics (docs/06-protocol.md)
 #define MQTT_MOVE_TOPIC "srv/adam/moveto"
 #define MQTT_RESET_TOPIC "srv/adam/reset"

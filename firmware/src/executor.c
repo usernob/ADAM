@@ -128,7 +128,7 @@ void executor_publish_telemetry(void) {
 static bool boot_status_settle(void) {
     // Query graph_fetch's own state instead of having it push state to us.
     // graph_fetch owns the "fetch failed" state, so we pull it from there.
-    if (graph_fetch_has_failed()) {
+    if (!graph_fetch_success()) {
         // error(req_id = 0, FETCH_FAILED) + ERROR, graph_version stays 0
         // (06 §6.4): the robot takes no job until reset or reboot.
         publish_error(0, ADAM_ERR_FETCH_FAILED);
@@ -285,10 +285,12 @@ static void perform_reset(void) {
     publish_state(0, POS_NEXT_NONE, ADAM_STATUS_IDLE);
 
     // Re-fetch with the boot rules: version 0 while loading, and on failure
-    // version stays 0 so every gate refuses jobs (06 §6.4, 07 §7.3.2).
+    // version stays 0 so every gate refuses jobs (06 §6.4, 07 §7.3.2). The
+    // fetch runs in its own task - this one's 4 KB stack cannot hold the TLS
+    // handshake.
     graph_invalidate();
     mqtt_publish_graph_version(0);
-    if (graph_fetch_run()) {
+    if (graph_fetch_rerun()) {
         // Republish the full retained telemetry even if nothing changed.
         s_published_status = -1; // force the status out again
         publish_state(0, POS_NEXT_NONE, ADAM_STATUS_IDLE);

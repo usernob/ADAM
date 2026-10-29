@@ -13,6 +13,7 @@
 #include "esp_wifi_default.h"
 #include "esp_wifi_types_generic.h"
 #include "freertos/event_groups.h"
+#include "freertos/idf_additions.h"
 #include "freertos/projdefs.h"
 #include "portmacro.h"
 #include <stddef.h>
@@ -101,16 +102,20 @@ esp_err_t wifi_init_sta() {
 
     ESP_LOGI(TAG, "ESP_WIFI_MODE_STA");
 
-    wifi_config_t config = {
-        .sta =
-            {
-                .ssid = WIFI_SSID,
-                .password = WIFI_PASS,
-            },
-    };
+    // The STA credentials live in the NVS blob (nvs.net80211), not in the
+    // firmware: no set_config() here, the driver reads it from NVS on start.
+    wifi_config_t config = {0};
 
     ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), TAG, "Failed to set wifi mode");
-    ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_STA, &config), TAG, "Failed to set wifi config");
+    ESP_RETURN_ON_ERROR(esp_wifi_get_config(WIFI_IF_STA, &config), TAG, "Failed to get wifi config");
+
+    // A blank SSID means the NVS partition was never provisioned; connecting
+    // would just burn the retries and wait out the fetch timeout.
+    if (config.sta.ssid[0] == '\0') {
+        ESP_LOGE(TAG, "No SSID in NVS - flash the NVS partition first");
+        return ESP_ERR_INVALID_STATE;
+    }
+
     ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "Failed to start wifi");
 
     ESP_LOGI(TAG, "wifi_init_sta finished.");
