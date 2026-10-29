@@ -10,6 +10,9 @@ PROJECT_DIR = env.subst("$PROJECT_DIR")
 MERGED_BIN = Path(BUILD_DIR) / "firmware.merged.bin"
 NVS_BIN = Path(BUILD_DIR) / "nvs_data.bin"
 
+# nvs-gen.py (loaded as a pre script) exports the CSV it generates from.
+CSV_FILE = env.get("CSV_FILE", str(Path(PROJECT_DIR) / "nvs_data.csv"))
+
 
 def get_nvs_offset():
     import csv
@@ -44,6 +47,16 @@ def get_nvs_offset():
 
 def merge_firmware(source, target, env):
     board = env.BoardConfig()
+
+    # The NVS image is a source of this target, so SCons builds it (through
+    # scripts/nvs-gen.py) before running this action. Fail loudly instead of
+    # merging a stale/missing image if that dependency ever gets detached.
+    if not NVS_BIN.is_file():
+        raise RuntimeError(
+            f"{NVS_BIN} is missing: merge_bin needs scripts/nvs-gen.py "
+            "registered as a pre script so the image is generated from "
+            f"{CSV_FILE}"
+        )
 
     esptool = Path(env.PioPlatform().get_package_dir("tool-esptoolpy")) / "esptool.py"
 
@@ -96,16 +109,16 @@ def merge_firmware(source, target, env):
 
 app_bin = Path(BUILD_DIR) / env.subst("${PROGNAME}.bin")
 
-nvs_target = env.Alias(
-    "nvs_dependency",
-    env.File(NVS_BIN),
-)
-
 merged_target = env.Command(
-    target=MERGED_BIN,
+    target=str(MERGED_BIN),
     source=[
         str(app_bin),
-        str(NVS_BIN),
+        # NVS image: the node already carries the builder from nvs-gen.py, so
+        # a changed nvs_data.csv regenerates the image before the merge.
+        env.File(str(NVS_BIN)),
+        # Depend on the CSV directly as well: any edit re-merges the image,
+        # even when the generated NVS bytes happen to stay identical.
+        env.File(CSV_FILE),
     ],
     action=merge_firmware,
 )

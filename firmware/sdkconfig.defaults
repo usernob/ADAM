@@ -1,0 +1,24 @@
+# ESP-IDF SDK overrides for this project.
+#
+# PlatformIO copies this file into sdkconfig.<env> for every environment, so it
+# only lists deliberate deviations from the framework defaults; everything else
+# stays at the IDF default. The generated per-env sdkconfig files are ignored
+# by git, see .gitignore.
+
+# 4 MB flash: partitions.csv needs room for a 2 MB app plus a 1984 KB spiffs.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+
+# Custom partition table from partitions.csv (nvs @0x9000 24 KB, 2 MB factory
+# app, spiffs), instead of the single-app default table.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+# Task watchdog has to stay enabled and keep checking the idle task: two TLS
+# sessions landing on core 0 at once (graph fetch + MQTT) is exactly the case
+# we want reported instead of silently tolerated.
+CONFIG_ESP_TASK_WDT_EN=y
+CONFIG_ESP_TASK_WDT_INIT=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=5
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=y

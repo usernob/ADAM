@@ -10,3 +10,6 @@ compile_commands.json
 *.old
 .cache
 nvs_data.csv
+# PlatformIO writes one sdkconfig per env; only the defaults belong in git
+sdkconfig.*
+!sdkconfig.defaults
