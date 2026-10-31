@@ -4,7 +4,7 @@
 
 Lingkungan operasional robot direpresentasikan sebagai **Weighted Undirected Graph G = (V, E)**:
 
-* **Node (V)**: Titik persimpangan garis sekaligus lokasi pemberhentian/panggilan robot. Node diberi label huruf kapital **`A`–`Z`**, unik, dengan `A` wajib ada sebagai Home. Satu graf berisi **maksimal 26 node**. Label seperti `AA`, angka, atau huruf kecil tidak valid. Label **tidak harus berurutan**; contoh `A, C, F` valid selama tidak ada duplikasi dan graf connected dari `A`.
+* **Node (V)**: Titik pada lintasan yang menjadi lokasi pemberhentian/panggilan robot, diberi label huruf kapital **`A`–`Z`**, unik, dengan `A` wajib ada sebagai Home. **Node bukan hanya persimpangan**: node bisa berada di tengah jalur lurus (derajat 2), di ujung garis (*dead end*, derajat 1), atau menjadi satu-satunya node pada graf (derajat 0). Setiap titik dengan **lebih dari dua edge (derajat 3–4) pasti node**, tetapi node tidak harus berderajat > 2. Derajat maksimal 4 karena hanya ada satu edge per arah mata angin. Satu graf berisi **maksimal 26 node**. Label seperti `AA`, angka, atau huruf kecil tidak valid. Label **tidak harus berurutan**; contoh `A, C, F` valid selama tidak ada duplikasi dan graf connected dari `A`.
 * **Edge (E)**: Lintasan garis hitam yang menghubungkan antar node.
 * **Bobot (W)**: Jarak relatif atau estimasi waktu tempuh (nilai rentang 1 sampai 63).
 * **Kapasitas Edge**: Maksimal 4 edge per node, sejajar dengan arah mata angin (**Utara, Timur, Selatan, Barat**), **dengan satu edge per arah mata angin per node** — karena robot hanya tahu arah hadap (N/E/S/W), dua edge yang searah dari node yang sama membuat tujuan belokan ambigu dan tidak dapat dieksekusi.
@@ -72,11 +72,24 @@ Graf adalah **artefak deployment**, bukan state yang diubah saat robot bekerja:
 * Admin reset **memuat ulang** graf (`GET /graph.bin`, lihat [docs/07-firmware.md](07-firmware.md) §7.3.2). Graf baru berlaku setelah robot reboot **atau** reset, dengan prasyarat yang sama: robot di Home `A` menghadap Utara. Tidak ada refresh graf lewat MQTT.
 * Rollback membuat versi baru dari snapshot graf lama; nomor versi tidak pernah diturunkan.
 
-## 2.3 Deteksi Fisik Persimpangan (Color Marker Sensing)
+## 2.3 Deteksi Fisik Node (Color Marker + Pola Garis)
 
-Untuk membedakan antara jalur lurus biasa dan titik persimpangan/node:
+Node adalah titik pada lintasan, **bukan hanya persimpangan**. Untuk mengenali titik node saat robot bergerak:
 
-* Setiap titik persimpangan (*Node*) diberi **marka penanda warna khusus** (*Color Marker*) pada lintasan garis hitam.
-* Robot menggunakan **Sensor Warna / Color Sensor Module** yang dipasang bersamaan dengan array sensor *line-follower* BFD-1000. Firmware memakai **3 channel aktif** (kiri, tengah, kanan); pemetaan GPIO ada di [docs/08-pins.md](08-pins.md).
-* Persimpangan terdeteksi saat ketiga channel sama-sama melihat garis hitam (`0b111`), lalu divalidasi oleh color marker.
-* Deteksi persimpangan yang tervalidasi akan memicu event `NODE_ARRIVED` pada *Task Executor* untuk mengeksekusi logika belokan/pemberhentian.
+* Setiap titik node (*Node*) diberi **marka penanda warna khusus** (*Color Marker*) pada lintasan garis hitam.
+* Robot menggunakan **Sensor Warna TCS3200** yang dipasang di atas garis, bersamaan dengan array sensor *line-follower* BFD-1000. Firmware memakai **3 channel aktif** (kiri, tengah, kanan); pemetaan GPIO ada di [docs/08-pins.md](08-pins.md).
+* **Detektor utama adalah color marker**, bukan pola `0b111`. Marker dibaca berkala (`NODE_MARKER_SAMPLE_MS`, default 100 ms) dan di-*debounce* selama `NODE_MARKER_RUNS` (default 2) pembacaan berturut-turut. Node tanpa cabang samping — di tengah jalur lurus (derajat 2) atau di ujung garis (derajat 1) — hanya bisa dideteksi lewat marker.
+* Pola sensor garis mengikuti topologi node dan **bukan** syarat deteksi:
+
+| Derajat node | Topologi | Pola garis (kiri/tengah/kanan) |
+| :--- | :--- | :--- |
+| 0 | satu-satunya node pada graf | tidak relevan (tidak ada lintasan) |
+| 1 | ujung garis (*dead end*) | `0b010` — hanya tengah |
+| 2 | lurus (edge masuk dan keluar searah) | `0b010` — hanya tengah |
+| 2 | belok (edge keluar 90°) | `0b011` (kiri) atau `0b110` (kanan) |
+| 3 | pertigaan | `0b011`/`0b110` bila ada cabang lurus, `0b111` bila dua cabang samping |
+| 4 | perempatan | `0b111` |
+
+* **Fallback** bila sensor warna mati/tidak tersedia: node dianggap tiba saat pola cabang — sensor tengah **dan minimal satu sisi** — bertahan `NODE_BRANCH_RUNS` (default 3) siklus kontrol berturut-turut. Fallback ini hanya berlaku untuk node dengan cabang samping (belok/pertigaan/perempatan); node lurus dan ujung garis tetap memerlukan marker.
+* Deteksi node yang tervalidasi akan memicu event `NODE_ARRIVED` pada *Task Executor* untuk mengeksekusi logika belokan/pemberhentian.
+* Setelah satu node terdeteksi, marker harus hilang dari pandangan sensor (dan pola cabang hilang pada jalur fallback) sebelum node berikutnya boleh dilaporkan, agar satu node tidak terdeteksi dua kali.

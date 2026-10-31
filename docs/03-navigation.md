@@ -13,7 +13,7 @@ Saat robot pertama kali dinyalakan (*power-on / restart*):
 
 ## 3.2 Logika Perubahan Orientasi
 
-Robot menyimpan variabel internal `currentHeading` (Utara, Timur, Selatan, Barat). Saat tiba di persimpangan/node, robot menghitung manuver berbelok berdasarkan selisih arah hadap saat ini dengan arah edge tujuan berikutnya:
+Robot menyimpan variabel internal `currentHeading` (Utara, Timur, Selatan, Barat). Saat tiba di node — baik node lurus, belok, ujung garis, maupun persimpangan — robot menghitung manuver berbelok berdasarkan selisih arah hadap saat ini dengan arah edge tujuan berikutnya:
 
 ```text
 Delta Direction = (Target Direction - Current Direction) mod 4

@@ -21,7 +21,7 @@ PWM: frekuensi 1 kHz, resolusi 8-bit (duty 0–255), timer LEDC low-speed.
 
 ## Sensor Garis BFD-1000 (3 channel aktif)
 
-Modul BFD-1000 punya 5 channel output, tetapi firmware hanya memakai **3 channel** (kiri, tengah, kanan) sesuai `SENSORS_PIN_LF_*` di `sensors.h`. Pola garis 3 bit: bit0 = kiri, bit1 = tengah, bit2 = kanan; persimpangan = `0b111`.
+Modul BFD-1000 punya 5 channel output, tetapi firmware hanya memakai **3 channel** (kiri, tengah, kanan) sesuai `SENSORS_PIN_LF_*` di `sensors.h`. Pola garis 3 bit: bit0 = kiri, bit1 = tengah, bit2 = kanan. Pola mengikuti topologi node: ujung garis/lurus = `0b010`, belokan = `0b011`/`0b110`, pertigaan/perempatan = `0b011`/`0b110`/`0b111` sesuai cabang yang ada. Deteksi node sendiri dipicu oleh color marker TCS3200, bukan oleh `0b111` (lihat [02-graph.md §2.3](02-graph.md#23-deteksi-fisik-node-color-marker--pola-garis)).
 
 | GPIO | Sinyal | Arah | Keterangan |
 | :--- | :--- | :--- | :--- |
@@ -52,6 +52,8 @@ Modul BFD-1000 punya 5 channel output, tetapi firmware hanya memakai **3 channel
 | 5 | S2 | Out | Pilih filter (R/G/B) |
 | 17 | S3 | Out | Pilih filter (R/G/B) |
 | 16 | OUT | Input | Keluaran frekuensi warna (pull-up enable) |
+
+> TCS3200 dipasang di atas garis hitam dan menjadi **detektor utama node**: di atas garis biasa sensor melihat hitam (pulsa panjang), sedangkan pada color marker sensor melihat warna terang (pulsa pendek). Firmware membacanya berkala dengan debounce; lihat [02-graph.md §2.3](02-graph.md#23-deteksi-fisik-node-color-marker--pola-garis).
 
 ## Ultrasonik HC-SR04 (kapasitas sampah)
 
