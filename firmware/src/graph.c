@@ -58,29 +58,32 @@ bool graph_ready(void) {
 // direction is always unambiguous for the robot (spec 2).
 // Notes: no C-G, F-J, K-O lanes (holes); S is a dead end; K is a hub.
 // clang-format off
+// Each row MUST be GRAPH_NODE_COUNT_MAX (26) bytes wide: the matrix is flat,
+// so C no longer pads short rows to 26 the way it did when this was [26][26].
+// Columns T..Z are always zero (only 19 nodes are active).
 const uint8_t dummy_graph[GRAPH_SIZE] = {
-// A                              B                              C                              D                              E                              F                              G                              H                              I                              J                              K                              L                              M                              N                              O                              P                              Q                              R                              S
-     0, EDGE_ENCODE(3, DIR_EAST), 0, 0, EDGE_ENCODE(9, DIR_SOUTH), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // A
-     EDGE_ENCODE(3, DIR_WEST), 0, EDGE_ENCODE(30, DIR_EAST), 0, 0, EDGE_ENCODE(1, DIR_SOUTH), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // B
-     0, EDGE_ENCODE(30, DIR_WEST), 0, EDGE_ENCODE(6, DIR_EAST), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // C
-     0, 0, EDGE_ENCODE(6, DIR_WEST), 0, 0, 0, 0, EDGE_ENCODE(2, DIR_SOUTH), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // D
+// A                              B                              C                              D                              E                              F                              G                              H                              I                              J                              K                              L                              M                              N                              O                              P                              Q                              R                              S                              T  U  V  W  X  Y  Z
+     0, EDGE_ENCODE(3, DIR_EAST), 0, 0, EDGE_ENCODE(9, DIR_SOUTH), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // A
+     EDGE_ENCODE(3, DIR_WEST), 0, EDGE_ENCODE(30, DIR_EAST), 0, 0, EDGE_ENCODE(1, DIR_SOUTH), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // B
+     0, EDGE_ENCODE(30, DIR_WEST), 0, EDGE_ENCODE(6, DIR_EAST), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // C
+     0, 0, EDGE_ENCODE(6, DIR_WEST), 0, 0, 0, 0, EDGE_ENCODE(2, DIR_SOUTH), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // D
 
-     EDGE_ENCODE(9, DIR_NORTH), 0, 0, 0, 0, EDGE_ENCODE(26, DIR_EAST), 0, 0, EDGE_ENCODE(5, DIR_SOUTH), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // E
-     0, EDGE_ENCODE(1, DIR_NORTH), 0, 0, EDGE_ENCODE(26, DIR_WEST), 0, EDGE_ENCODE(47, DIR_EAST), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // F
-     0, 0, 0, 0, 0, EDGE_ENCODE(47, DIR_WEST), 0, EDGE_ENCODE(15, DIR_EAST), 0, 0, EDGE_ENCODE(14, DIR_SOUTH), 0, 0, 0, 0, 0, 0, 0, 0, // G
-     0, 0, 0, EDGE_ENCODE(2, DIR_NORTH), 0, 0, EDGE_ENCODE(15, DIR_WEST), 0, 0, 0, 0, EDGE_ENCODE(19, DIR_SOUTH), 0, 0, 0, 0, 0, 0, 0, // H
+     EDGE_ENCODE(9, DIR_NORTH), 0, 0, 0, 0, EDGE_ENCODE(26, DIR_EAST), 0, 0, EDGE_ENCODE(5, DIR_SOUTH), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // E
+     0, EDGE_ENCODE(1, DIR_NORTH), 0, 0, EDGE_ENCODE(26, DIR_WEST), 0, EDGE_ENCODE(47, DIR_EAST), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // F
+     0, 0, 0, 0, 0, EDGE_ENCODE(47, DIR_WEST), 0, EDGE_ENCODE(15, DIR_EAST), 0, 0, EDGE_ENCODE(14, DIR_SOUTH), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // G
+     0, 0, 0, EDGE_ENCODE(2, DIR_NORTH), 0, 0, EDGE_ENCODE(15, DIR_WEST), 0, 0, 0, 0, EDGE_ENCODE(19, DIR_SOUTH), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // H
 
-     0, 0, 0, 0, EDGE_ENCODE(5, DIR_NORTH), 0, 0, 0, 0, EDGE_ENCODE(2, DIR_EAST), 0, 0, EDGE_ENCODE(21, DIR_SOUTH), 0, 0, 0, 0, 0, 0, // I
-     0, 0, 0, 0, 0, 0, 0, 0, EDGE_ENCODE(2, DIR_WEST), 0, EDGE_ENCODE(8, DIR_EAST), 0, 0, EDGE_ENCODE(33, DIR_SOUTH), 0, 0, 0, 0, 0, // J
-     0, 0, 0, 0, 0, 0, EDGE_ENCODE(14, DIR_NORTH), 0, 0, EDGE_ENCODE(8, DIR_WEST), 0, EDGE_ENCODE(4, DIR_EAST), 0, 0, 0, 0, 0, 0, 0, // K
-     0, 0, 0, 0, 0, 0, 0, EDGE_ENCODE(19, DIR_NORTH), 0, 0, EDGE_ENCODE(4, DIR_WEST), 0, 0, 0, 0, EDGE_ENCODE(12, DIR_SOUTH), 0, 0, 0, // L
+     0, 0, 0, 0, EDGE_ENCODE(5, DIR_NORTH), 0, 0, 0, 0, EDGE_ENCODE(2, DIR_EAST), 0, 0, EDGE_ENCODE(21, DIR_SOUTH), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // I
+     0, 0, 0, 0, 0, 0, 0, 0, EDGE_ENCODE(2, DIR_WEST), 0, EDGE_ENCODE(8, DIR_EAST), 0, 0, EDGE_ENCODE(33, DIR_SOUTH), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // J
+     0, 0, 0, 0, 0, 0, EDGE_ENCODE(14, DIR_NORTH), 0, 0, EDGE_ENCODE(8, DIR_WEST), 0, EDGE_ENCODE(4, DIR_EAST), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // K
+     0, 0, 0, 0, 0, 0, 0, EDGE_ENCODE(19, DIR_NORTH), 0, 0, EDGE_ENCODE(4, DIR_WEST), 0, 0, 0, 0, EDGE_ENCODE(12, DIR_SOUTH), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // L
 
-     0, 0, 0, 0, 0, 0, 0, 0, EDGE_ENCODE(21, DIR_NORTH), 0, 0, 0, 0, EDGE_ENCODE(7, DIR_EAST), 0, 0, 0, 0, 0, // M
-     0, 0, 0, 0, 0, 0, 0, 0, 0, EDGE_ENCODE(33, DIR_NORTH), 0, 0, EDGE_ENCODE(7, DIR_WEST), 0, EDGE_ENCODE(40, DIR_EAST), 0, 0, 0, 0, // N
-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, EDGE_ENCODE(40, DIR_WEST), 0, EDGE_ENCODE(6, DIR_EAST), 0, 0, 0, // O
-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, EDGE_ENCODE(12, DIR_NORTH), 0, 0, EDGE_ENCODE(6, DIR_WEST), 0, EDGE_ENCODE(10, DIR_EAST), 0, 0, // P
-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, EDGE_ENCODE(10, DIR_WEST), 0, EDGE_ENCODE(2, DIR_EAST), 0, // Q
-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, EDGE_ENCODE(2, DIR_WEST), 0, EDGE_ENCODE(13, DIR_NORTH), // R
-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, EDGE_ENCODE(13, DIR_SOUTH), 0 // S
+     0, 0, 0, 0, 0, 0, 0, 0, EDGE_ENCODE(21, DIR_NORTH), 0, 0, 0, 0, EDGE_ENCODE(7, DIR_EAST), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // M
+     0, 0, 0, 0, 0, 0, 0, 0, 0, EDGE_ENCODE(33, DIR_NORTH), 0, 0, EDGE_ENCODE(7, DIR_WEST), 0, EDGE_ENCODE(40, DIR_EAST), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // N
+     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, EDGE_ENCODE(40, DIR_WEST), 0, EDGE_ENCODE(6, DIR_EAST), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // O
+     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, EDGE_ENCODE(12, DIR_NORTH), 0, 0, EDGE_ENCODE(6, DIR_WEST), 0, EDGE_ENCODE(10, DIR_EAST), 0, 0, 0, 0, 0, 0, 0, 0, 0, // P
+     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, EDGE_ENCODE(10, DIR_WEST), 0, EDGE_ENCODE(2, DIR_EAST), 0, 0, 0, 0, 0, 0, 0, 0, // Q
+     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, EDGE_ENCODE(2, DIR_WEST), 0, EDGE_ENCODE(13, DIR_NORTH), 0, 0, 0, 0, 0, 0, 0, // R
+     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, EDGE_ENCODE(13, DIR_SOUTH), 0, 0, 0, 0, 0, 0, 0, 0, // S
 };
 // clang-format on
