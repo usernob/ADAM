@@ -3,6 +3,7 @@
 
 #include "esp_err.h"
 #include "protocol.h"
+#include <stddef.h>
 
 esp_err_t executor_init(void);
 
@@ -26,5 +27,12 @@ void executor_set_error(uint16_t req_id, adam_error_t reason);
  * The executor is the sole writer of the navigation state, so the MQTT task
  * never mutates it directly. */
 void executor_request_reset(void);
+
+#ifdef ADAM_SENSOR_MOCK
+/* Sensor-mock support (sensors.c): the edge currently being driven
+ * (from -> to). false when the executor is not MOVING, so the mock can derive
+ * the simulated line from the real graph instead of a blind timer. */
+bool executor_active_edge(size_t* from, size_t* to);
+#endif
 
 #endif // SRC_EXECUTOR_H

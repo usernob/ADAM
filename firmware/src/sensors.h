@@ -20,7 +20,7 @@
  * Used by the dwell loop to extend the timer while the user throws trash. */
 #define SENSORS_PIN_HAND_IR 13
 
-// TCS3200 color sensor (node color marker detection - spec 2.2)
+// TCS3200 color sensor (node color marker detection - spec 2.3)
 #define SENSORS_PIN_TCS_S0 19
 #define SENSORS_PIN_TCS_S1 18
 #define SENSORS_PIN_TCS_S2 5
@@ -52,7 +52,7 @@ esp_err_t sensors_init(void);
 // Read the 5 BFD-1000 channels, left to right (S1..S5): 1 = line detected
 void sensors_line_read(int line[SENSORS_LINE_COUNT]);
 
-/* Detect a bright color marker under the robot (= junction node, spec 2.2).
+/* Detect a bright color marker under the robot (= node, spec 2.3).
  * Measures the pulse width of every RGB channel and reports whether one
  * of them is bright enough. false on a black line or on blank ground. */
 bool sensors_color_marker_present(void);

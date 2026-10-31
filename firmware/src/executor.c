@@ -56,9 +56,17 @@ static void publish_error(uint16_t req_id, adam_error_t reason);
 #define PID_KD 18.0f
 #define PID_LOOP_MS 10 // 100 Hz control loop (spec 7.1)
 
-// Node detection: the 5-IR junction must be seen several times in a row
-#define NODE_JUNCTION_RUNS 3
-#define LINE_PATTERN_ALL 0b111
+// Node detection (spec 2.3): the TCS3200 color marker is the primary detector.
+// One measurement blocks the control loop for a few ms, so it is sampled on an
+// interval and debounced. A node on a straight stretch or at a line end has no
+// side branches, so the line pattern alone cannot find it.
+#define NODE_MARKER_SAMPLE_MS 100
+#define NODE_MARKER_RUNS 2
+// Fallback when the color sensor is unavailable: a branch pattern (centre plus
+// at least one side) held for several control loops (10 ms each).
+#define NODE_BRANCH_RUNS 3
+#define LINE_PATTERN_CENTER 0b010
+#define LINE_PATTERN_SIDES 0b101
 // Navigation errors: line lost while MOVING (spec 7.2) and step timeout
 #define LINE_LOST_MS 500
 #define STEP_TIMEOUT_MS 30000
@@ -68,10 +76,11 @@ static size_t s_step = 0;
 
 static float s_last_error = 0.0f;
 
-// Junction counter of the node detection (spec 2.2)
-static int s_junction_run = 0;
-// Color marker validation of the junction that is currently counted
-static bool s_junction_valid = false;
+// Node detection counters (spec 2.3): consecutive color-marker samples, and
+// consecutive branch patterns for the fallback path.
+static int s_marker_run = 0;
+static int s_branch_run = 0;
+static int64_t s_marker_next_ms = 0;
 
 static inline int64_t now_ms(void) {
     return esp_timer_get_time() / 1000;
@@ -79,9 +88,11 @@ static inline int64_t now_ms(void) {
 
 static int64_t s_step_deadline = 0;
 static int64_t s_no_line_since = -1;
-// Anti false-arrival latch: after an arrival the junction has to leave the
-// sensor view before the next node may be detected
-static bool s_wait_clear = false;
+// Anti false-arrival latch: after an arrival the marker (or the branch pattern
+// on the fallback path) has to leave the sensor view before the next node may
+// be detected. Starts true: at boot/reset the robot sits on Home's marker, so
+// that marker must clear before the first node of the ride is reported.
+static bool s_wait_clear = true;
 
 // Serial log name only - never sent on the wire (docs/06-protocol.md)
 static const char* err_name(adam_error_t err) {
@@ -105,6 +116,20 @@ adam_status_t executor_status(void) {
     portEXIT_CRITICAL(&s_telemetry_mux);
     return status;
 }
+
+#ifdef ADAM_SENSOR_MOCK
+// Sensor-mock support: expose the edge being driven so the mock line follows
+// the real graph (sensors.c). Read-only peek at the executor's navigation
+// state; only compiled into mock builds.
+bool executor_active_edge(size_t* from, size_t* to) {
+    if (s_state != STATE_MOVING || s_step == 0 || s_step >= s_nav.len) {
+        return false;
+    }
+    *from = s_nav.path[s_step - 1];
+    *to = s_nav.path[s_step];
+    return true;
+}
+#endif
 
 void executor_publish_telemetry(void) {
     if (s_telemetry_publish_mutex == NULL) {
@@ -275,9 +300,9 @@ static void perform_reset(void) {
     mqtt_flush_jobs();
     s_nav.len = 0;
     s_step = 0;
-    s_junction_run = 0;
-    s_junction_valid = false;
-    s_wait_clear = false;
+    s_marker_run = 0;
+    s_branch_run = 0;
+    s_wait_clear = true;
     s_last_error = 0.0f;
 
     path_resolver_set_current(0);
@@ -394,26 +419,49 @@ static void moving_tick(void) {
 
     motor_set_speed(PID_BASE_SPEED - (int)(p + d), PID_BASE_SPEED + (int)(p + d));
 
-    // Node arrival detection (spec 2.2): all 5 BFD-1000 sensors see the line at
-    // the same time (junction), validated by the TCS3200 color marker.
-    // After one arrival the junction has to leave the sensors first (s_wait_clear).
-    bool node_detected = false;
+    // Node arrival detection (spec 2.3): the TCS3200 color marker is the
+    // primary detector, so a node on a straight stretch or at a line end
+    // (centre sensor only) is still found. Sample it on an interval because one
+    // measurement blocks the control loop for a few ms, then debounce over
+    // NODE_MARKER_RUNS.
+    if (now_ms() >= s_marker_next_ms) {
+        s_marker_next_ms = now_ms() + NODE_MARKER_SAMPLE_MS;
+        if (sensors_color_marker_present()) {
+            if (s_marker_run < NODE_MARKER_RUNS) {
+                s_marker_run++;
+            }
+        } else {
+            s_marker_run = 0;
+        }
+    }
+    bool marker_present = (s_marker_run >= NODE_MARKER_RUNS);
 
-    if (s_wait_clear && pattern != LINE_PATTERN_ALL) {
+    // Fallback for a dead color sensor: a branch (centre + at least one side)
+    // means a node. A straight node is invisible to this path.
+    bool branch = (pattern & LINE_PATTERN_CENTER) && (pattern & LINE_PATTERN_SIDES);
+    if (branch && !s_wait_clear) {
+        if (s_branch_run < NODE_BRANCH_RUNS) {
+            s_branch_run++;
+        }
+    } else {
+        s_branch_run = 0;
+    }
+
+    // After one arrival the marker (or, on the fallback path, the branch) has
+    // to leave the sensors before the next node may be reported.
+    if (s_wait_clear && !marker_present && !branch) {
         s_wait_clear = false;
     }
 
-    if (!s_wait_clear && pattern == LINE_PATTERN_ALL) {
-        if (s_junction_run == 0) {
-            s_junction_valid = sensors_color_marker_present();
-        }
-        s_junction_run++;
-        if (s_junction_run >= NODE_JUNCTION_RUNS) {
+    bool node_detected = false;
+    bool node_via_marker = false;
+    if (!s_wait_clear) {
+        if (marker_present) {
+            node_detected = true;
+            node_via_marker = true;
+        } else if (s_branch_run >= NODE_BRANCH_RUNS) {
             node_detected = true;
         }
-    } else if (pattern != LINE_PATTERN_ALL) {
-        s_junction_run = 0;
-        s_junction_valid = false;
     }
 
     if (!node_detected) {
@@ -428,11 +476,11 @@ static void moving_tick(void) {
 
     // Valid node arrival
     motor_halt();
-    ESP_LOGI(TAG, "NODE DETECTED (marker: %s)", s_junction_valid ? "TCS3200 color" : "5-IR junction fallback");
+    ESP_LOGI(TAG, "NODE DETECTED (marker: %s)", node_via_marker ? "TCS3200 color" : "line branch fallback");
 
     size_t to = s_nav.path[s_step];
-    s_junction_run = 0;
-    s_junction_valid = false;
+    s_marker_run = 0;
+    s_branch_run = 0;
     s_wait_clear = true;
     path_resolver_set_current(to);
     s_step++;
@@ -444,7 +492,8 @@ static void moving_tick(void) {
 
     if (s_step >= s_nav.len) {
         // Path finished; publish the destination with its settled status directly.
-        s_junction_run = 0;
+        s_marker_run = 0;
+        s_branch_run = 0;
 
         if (s_nav.job.internal) {
             // Auto-park (07 §7.6): no dwell on the internal ride home, settle
