@@ -67,9 +67,13 @@ static void publish_error(uint16_t req_id, adam_error_t reason);
 #define NODE_BRANCH_RUNS 3
 #define LINE_PATTERN_CENTER 0b010
 #define LINE_PATTERN_SIDES 0b101
-// Navigation errors: line lost while MOVING (spec 7.2) and step timeout
+// Navigation errors: line lost while MOVING (spec 7.2) and step timeout.
+// The edge weight is a relative distance / estimated travel time (1..63), so
+// one fixed deadline cannot fit every edge: a weight-47 edge takes far longer
+// than a weight-1 edge. Budget = base (turn manoeuvre + margin) + weight.
 #define LINE_LOST_MS 500
-#define STEP_TIMEOUT_MS 30000
+#define STEP_TIMEOUT_BASE_MS 10000
+#define STEP_TIMEOUT_PER_WEIGHT_MS 1000
 
 static nav_path_t s_nav;
 static size_t s_step = 0;
@@ -87,7 +91,16 @@ static inline int64_t now_ms(void) {
 }
 
 static int64_t s_step_deadline = 0;
+static int64_t s_step_started_ms = 0;
+static int32_t s_step_timeout_ms = 0;
 static int64_t s_no_line_since = -1;
+// True only while the robot is actually following the line. It stays false
+// during the in-place turn at a node, so the sensor mock does not consume the
+// new edge's non-node lead-in while the robot is still rotating. Without this,
+// a short edge (weight 1-2) reaches its node window during the turn, the mock
+// marker is already on when the executor resumes, and the anti-false-arrival
+// latch can never clear.
+static volatile bool s_line_active = false;
 // Anti false-arrival latch: after an arrival the marker (or the branch pattern
 // on the fallback path) has to leave the sensor view before the next node may
 // be detected. Starts true: at boot/reset the robot sits on Home's marker, so
@@ -122,7 +135,7 @@ adam_status_t executor_status(void) {
 // the real graph (sensors.c). Read-only peek at the executor's navigation
 // state; only compiled into mock builds.
 bool executor_active_edge(size_t* from, size_t* to) {
-    if (s_state != STATE_MOVING || s_step == 0 || s_step >= s_nav.len) {
+    if (s_state != STATE_MOVING || !s_line_active || s_step == 0 || s_step >= s_nav.len) {
         return false;
     }
     *from = s_nav.path[s_step - 1];
@@ -336,6 +349,8 @@ static void perform_reset(void) {
 // Turn onto the edge direction and reset the deadline (spec 3.2). Returns false
 // when the edge is not valid in the current graph.
 static bool move_begin_step(void) {
+    s_line_active = false;
+
     size_t from = s_nav.path[s_step - 1];
     size_t to = s_nav.path[s_step];
 
@@ -355,12 +370,19 @@ static bool move_begin_step(void) {
     // Edge start enters MOVING; update status and current_pos atomically (07:58).
     publish_state(from, (int)to, ADAM_STATUS_MOVING);
 
-    s_step_deadline = now_ms() + STEP_TIMEOUT_MS;
+    s_step_timeout_ms = STEP_TIMEOUT_BASE_MS + ((int32_t)EDGE_WEIGHT(edge) * STEP_TIMEOUT_PER_WEIGHT_MS);
+    s_step_started_ms = now_ms();
+    s_step_deadline = s_step_started_ms + s_step_timeout_ms;
     s_no_line_since = -1;
     s_last_error = 0.0f;
 
-    ESP_LOGI(TAG, "Step %d/%d: %c -> %c dir %s", (int)s_step, (int)s_nav.len - 1, (int)(from + 'A'), (int)(to + 'A'),
-             STR_DIR[EDGE_DIR(edge)]);
+    ESP_LOGI(TAG, "Step %d/%d: %c -> %c dir %s weight %u (timeout %d ms)", (int)s_step, (int)s_nav.len - 1,
+             (int)(from + 'A'), (int)(to + 'A'), STR_DIR[EDGE_DIR(edge)], (unsigned)EDGE_WEIGHT(edge),
+             (int)s_step_timeout_ms);
+
+    // Let the mock start the new edge only now: the turn and the telemetry
+    // publish above must not eat the edge's non-node lead-in.
+    s_line_active = true;
     return true;
 }
 
@@ -467,7 +489,11 @@ static void moving_tick(void) {
     if (!node_detected) {
         // Step timeout: the node was not reached
         if (now_ms() > s_step_deadline) {
-            ESP_LOGE(TAG, "Step %d/%d not finished within %d ms", (int)s_step, (int)s_nav.len - 1, STEP_TIMEOUT_MS);
+            ESP_LOGE(TAG,
+                     "Step %d/%d not finished in %lld ms (budget %d ms, pattern=0x%X marker_run=%d branch_run=%d "
+                     "wait_clear=%d)",
+                     (int)s_step, (int)s_nav.len - 1, (long long)(now_ms() - s_step_started_ms), (int)s_step_timeout_ms,
+                     pattern, s_marker_run, s_branch_run, (int)s_wait_clear);
             executor_set_error(s_nav.job.req.id, ADAM_ERR_NODE_TIMEOUT);
             return;
         }
@@ -476,6 +502,7 @@ static void moving_tick(void) {
 
     // Valid node arrival
     motor_halt();
+    s_line_active = false;
     ESP_LOGI(TAG, "NODE DETECTED (marker: %s)", node_via_marker ? "TCS3200 color" : "line branch fallback");
 
     size_t to = s_nav.path[s_step];

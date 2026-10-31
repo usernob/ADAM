@@ -290,7 +290,7 @@ void sensors_buzzer_beep(int ms) {
 #    include "graph.h"
 
 #    define MOCK_TICK_MS 100
-#    define MOCK_TICKS_PER_WEIGHT 4   // 4 x 100 ms per weight unit (63 -> 25.2 s, under the 30 s step timeout)
+#    define MOCK_TICKS_PER_WEIGHT 4   // 4 x 100 ms per weight unit (63 -> 25.2 s)
 #    define MOCK_NODE_TICKS 6         // 600 ms node window: enough for 2 marker samples 100 ms apart
 #    define MOCK_HAND_PERIOD_TICKS 50 // 5 s hand present, then 5 s away
 #    define MOCK_TRASH_START_PERCENT 40
@@ -371,6 +371,11 @@ static void update_sensor(void* pvParameters) {
                 uint32_t node_ticks = MOCK_NODE_TICKS;
                 if (node_ticks >= travel) {
                     node_ticks = (travel > 1) ? travel - 1 : 1;
+                }
+                if (edge_ticks == 0) {
+                    ESP_LOGI(TAG, "mock: edge %c -> %c weight %u, travel %lu ms, node window %lu ms", (int)(from + 'A'),
+                             (int)(to + 'A'), (unsigned)weight, (unsigned long)(travel * MOCK_TICK_MS),
+                             (unsigned long)(node_ticks * MOCK_TICK_MS));
                 }
                 bool node_window = (edge_ticks + node_ticks) >= travel;
 
